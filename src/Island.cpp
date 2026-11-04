@@ -40,7 +40,7 @@ constexpr float kMaxW = 420.f, kMaxH = 180.f;
 
 // Görünüm boyutları (DIP)
 struct Size3 { float w, h, r; };
-constexpr Size3 kIdle{136, 24, 12};
+constexpr Size3 kIdle{78, 22, 11};
 constexpr Size3 kMedia{236, 34, 17};
 constexpr Size3 kExpandedMedia{400, 164, 40};
 constexpr Size3 kExpandedIdle{320, 96, 36};
@@ -609,12 +609,8 @@ void Island::DrawBars(float right, float centerY, float maxHeight, float barWidt
 }
 
 void Island::DrawIdle(float w, float h) {
-    // Boştayken sade: saat ve tarih. Üzerine gelince gözlü ada açılır.
-    SYSTEMTIME st;
-    GetLocalTime(&st);
-    Text(FormatClock(st).c_str(), fTiny_.Get(), D2D1::RectF(12, 0, w / 2, h), kWhite);
-    Text(FormatShortDate(st).c_str(), fTinyRight_.Get(), D2D1::RectF(w / 2 - 24, 0, w - 12, h),
-         kGray);
+    // Boştayken sadece küçük iki göz; üzerine gelince ada açılır.
+    eyes_.Draw(rt_.Get(), d2d_.Get(), brush_.Get(), roundStroke_.Get(), w / 2, h / 2, 0.72f, 0.f);
 }
 
 void Island::DrawCompactMedia(float w, float h) {
