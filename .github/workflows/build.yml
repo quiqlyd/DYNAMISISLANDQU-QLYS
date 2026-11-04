@@ -1,0 +1,37 @@
+name: build
+
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  windows:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Configure
+        run: cmake -S . -B build -A x64 -DAPP_VERSION=${{ github.run_number }}
+      - name: Build
+        run: cmake --build build --config Release
+      - uses: actions/upload-artifact@v4
+        with:
+          name: DynamisIsland
+          path: build/Release/DynamisIsland.exe
+
+      # main'e gelen her değişiklik yeni bir sürüm olarak yayınlanır;
+      # uygulamadaki "Güncelleştir" butonu bunu indirir.
+      - name: Publish release
+        if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          NOTES: ${{ github.event.head_commit.message }}
+        shell: bash
+        run: |
+          gh release create "build-${{ github.run_number }}" build/Release/DynamisIsland.exe \
+            --target "${{ github.sha }}" \
+            --title "Sürüm ${{ github.run_number }}" \
+            --notes "$NOTES" --latest
