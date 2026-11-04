@@ -126,7 +126,8 @@ private:
     // Gözler
     Eyes eyes_;
     double lastActivity_ = 0;
-    double clickTimes_[4]{};
-    int clickIndex_ = 0;
+    double lastClick_ = 0;
+    int clickStreak_ = 0;
+    bool lastPlaying_ = false;
     std::wstring lastTitle_;
 };

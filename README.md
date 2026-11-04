@@ -5,7 +5,11 @@ Windows 11 için Dinamik Ada (ve ileride modern taskbar). C++ ve saf Win32 + Dir
 ## Neler yapıyor (1. aşama)
 
 - Ekranın üst ortasında iPhone tarzı siyah ada
-- **İki robot göz:** göz kırpar, fareyi takip eder, tıklayınca (sevince) mutlu olur ve zıplar, art arda çok tıklarsan başı döner ve sallanır, 90 saniye kimse yokken uyur, fare yaklaşınca uyanır
+- **İki robot göz ve duyguları:** boştayken sadece küçük gözler görünür. Göz kırpar, fareyi takip eder, ara sıra kendi kendine etrafa bakınır, göz kırpar ya da şirinlik yapar
+  - Ada açıkken gözlere tıkla: 1-2 tık **mutlu**, 3 tık **kıkırdar**, 4 tık **aşık olur** (kalp gözler), 5+ tık **kızar** ve sallanır, 8+ tık **başı döner**
+  - Şarj takılınca kalp gözler, şarj çıkınca ya da pil azalınca **üzülür** (gözyaşı)
+  - Müzik başlayınca sevinir, durunca üzülür, yeni şarkıda şaşırır
+  - Kimse yokken uyur (gece daha çabuk), fare yaklaşınca uyanır
 - **Müzik:** Spotify, tarayıcı, Medya Oynatıcı... Kapak resmi, şarkı/sanatçı, ilerleme çubuğu, geri / oynat-durdur / ileri. Ekolayzer kapak rengini alır, gözler ritimle sallanır
 - Üzerine gelince açılır: müzik yoksa büyük saat, tarih, pil ve gözler
 - Şarj takıldı / çıkarıldı / pil azaldı uyarıları

@@ -353,8 +353,9 @@ void Island::ShowAlert(AlertKind kind, int value, UINT durationMs) {
     else KillTimer(hwnd_, kTimerAlert);
     double now = Now();
     lastActivity_ = now;
-    if (kind == AlertKind::Charging) eyes_.SetMood(Eyes::Mood::Happy, now, 4.5);
-    if (kind == AlertKind::LowBattery) eyes_.SetMood(Eyes::Mood::Sleepy, now, 4.5);
+    if (kind == AlertKind::Charging) eyes_.SetMood(Eyes::Mood::Love, now, 4.5);
+    if (kind == AlertKind::Unplugged) eyes_.SetMood(Eyes::Mood::Sad, now, 2.5);
+    if (kind == AlertKind::LowBattery) eyes_.SetMood(Eyes::Mood::Sad, now, 4.5);
     if (kind == AlertKind::UpToDate || kind == AlertKind::UpdateAvailable)
         eyes_.SetMood(Eyes::Mood::Happy, now, 4.0);
     if (kind == AlertKind::UpdateFailed) eyes_.SetMood(Eyes::Mood::Dizzy, now, 2.0);
@@ -765,18 +766,28 @@ bool Island::ViewShowsEyes() const {
 }
 
 void Island::Pet() {
+    // Tıklama serisine göre duygu: sevilmek hoşuna gider, abartınca kızar.
     double now = Now();
     lastActivity_ = now;
-    clickTimes_[clickIndex_] = now;
-    clickIndex_ = (clickIndex_ + 1) % 4;
-    double oldest = clickTimes_[clickIndex_];  // dört tık önceki zaman
-    if (oldest > 0 && now - oldest < 1.3) {
-        // Çok dürtüldü: başı döner, ada "hayır" der gibi sallanır.
-        eyes_.SetMood(Eyes::Mood::Dizzy, now, 1.6);
+    clickStreak_ = (now - lastClick_ < 0.7) ? clickStreak_ + 1 : 1;
+    lastClick_ = now;
+
+    using M = Eyes::Mood;
+    if (clickStreak_ >= 8) {
+        eyes_.SetMood(M::Dizzy, now, 2.0);  // başı döndü
         shake_.velocity += 420.f;
-        for (double& t : clickTimes_) t = 0;
+        clickStreak_ = 0;
+    } else if (clickStreak_ >= 5) {
+        eyes_.SetMood(M::Angry, now, 2.2);  // "yeter!"
+        shake_.velocity += 300.f;
+    } else if (clickStreak_ == 4) {
+        eyes_.SetMood(M::Love, now, 2.6);
+        height_.velocity += 60.f;
+    } else if (clickStreak_ == 3) {
+        eyes_.SetMood(M::Laugh, now, 1.8);  // gıdıklandı
+        height_.velocity += 80.f;
     } else {
-        eyes_.SetMood(Eyes::Mood::Happy, now, 1.4);
+        eyes_.SetMood(M::Happy, now, 1.4);
         height_.velocity += 70.f;  // sevinçle zıplar
         width_.velocity += 50.f;
     }
@@ -806,8 +817,11 @@ void Island::OnLookTimer() {
     }
     if (snapshot_.playing) lastActivity_ = now;
 
-    // 90 sn kimse yoksa uyur.
-    if (now - lastActivity_ > 90 && eyes_.CurrentMood() == Eyes::Mood::Normal) {
+    // Kimse yoksa uyur: gündüz 90 sn, gece yarısından sonra 30 sn.
+    SYSTEMTIME lt;
+    GetLocalTime(&lt);
+    double sleepAfter = lt.wHour < 6 ? 30 : 90;
+    if (now - lastActivity_ > sleepAfter && eyes_.CurrentMood() == Eyes::Mood::Normal) {
         eyes_.SetMood(Eyes::Mood::Sleepy, now, 0);
     }
 
@@ -825,6 +839,7 @@ void Island::OnLookTimer() {
                     eyes_.SetMood(Eyes::Mood::Surprised, now, 0.45);
             } else if (now - hoverSince_ >= 0.45) {
                 hover_ = true;
+                if (!snapshot_.hasSession) eyes_.SetMood(Eyes::Mood::Cute, now, 1.2);  // "merhaba!"
                 hoverSince_ = 0;
                 outsideSince_ = 0;
                 Update();
@@ -1012,7 +1027,13 @@ LRESULT Island::WndProc(UINT msg, WPARAM wp, LPARAM lp) {
                 lastActivity_ = Now();
             }
             lastTitle_ = snapshot_.title;
+        } else if (snapshot_.hasSession && snapshot_.playing != lastPlaying_) {
+            // Müzik başlayınca sevinir, durunca biraz üzülür.
+            eyes_.SetMood(snapshot_.playing ? Eyes::Mood::Happy : Eyes::Mood::Sad, Now(),
+                          snapshot_.playing ? 1.4 : 1.6);
+            lastActivity_ = Now();
         }
+        lastPlaying_ = snapshot_.playing;
         Update();
         return 0;
 
