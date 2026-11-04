@@ -1,4 +1,5 @@
 #include "Island.h"
+#include "Updater.h"
 
 #include <objbase.h>
 #include <shellapi.h>
@@ -23,18 +24,23 @@ constexpr UINT_PTR kTimerHover = 3;
 constexpr UINT_PTR kTimerCollapse = 4;
 constexpr UINT_PTR kTimerAlert = 5;
 constexpr UINT_PTR kTimerLook = 6;
+constexpr UINT_PTR kTimerUpdateCheck = 7;
+constexpr int kHotkeyToggle = 1;
 
 constexpr UINT kTrayMsg = WM_APP + 2;
 constexpr UINT kTrayId = 1;
 constexpr UINT kCmdAutostart = 100;
 constexpr UINT kCmdExit = 101;
+constexpr UINT kCmdToggle = 102;
+constexpr UINT kCmdUpdate = 103;
+constexpr wchar_t kSettingsKey[] = L"Software\\DynamisIsland";
 
-constexpr float kTopMargin = 8.f;
+constexpr float kTopMargin = 4.f;
 constexpr float kMaxW = 420.f, kMaxH = 180.f;
 
 // Görünüm boyutları (DIP)
 struct Size3 { float w, h, r; };
-constexpr Size3 kIdle{128, 34, 17};
+constexpr Size3 kIdle{136, 24, 12};
 constexpr Size3 kMedia{236, 34, 17};
 constexpr Size3 kExpandedMedia{400, 164, 40};
 constexpr Size3 kExpandedIdle{320, 96, 36};
@@ -47,6 +53,9 @@ constexpr wchar_t kGlyphPlay[] = L"\xE768";
 constexpr wchar_t kGlyphPause[] = L"\xE769";
 constexpr wchar_t kGlyphMusic[] = L"\xE8D6";
 constexpr wchar_t kGlyphBolt[] = L"\xE945";
+constexpr wchar_t kGlyphSync[] = L"\xE895";
+constexpr wchar_t kGlyphCheck[] = L"\xE73E";
+constexpr wchar_t kGlyphError[] = L"\xE783";
 
 constexpr wchar_t kRunKey[] = L"Software\\Microsoft\\Windows\\CurrentVersion\\Run";
 constexpr wchar_t kRunValue[] = L"DynamisIsland";
@@ -72,6 +81,30 @@ std::wstring FormatDate(const SYSTEMTIME& st) {
     if (GetDateFormatEx(LOCALE_NAME_USER_DEFAULT, 0, &st, L"dddd, d MMMM", buf, 128, nullptr))
         return buf;
     return L"";
+}
+
+std::wstring FormatShortDate(const SYSTEMTIME& st) {
+    wchar_t buf[64];
+    if (GetDateFormatEx(LOCALE_NAME_USER_DEFAULT, 0, &st, L"ddd d MMM", buf, 64, nullptr))
+        return buf;
+    return L"";
+}
+
+DWORD ReadSetting(const wchar_t* name, DWORD fallback) {
+    DWORD value = fallback, size = sizeof(value);
+    if (RegGetValueW(HKEY_CURRENT_USER, kSettingsKey, name, RRF_RT_REG_DWORD, nullptr, &value,
+                     &size) != ERROR_SUCCESS)
+        return fallback;
+    return value;
+}
+
+void WriteSetting(const wchar_t* name, DWORD value) {
+    HKEY key;
+    if (RegCreateKeyExW(HKEY_CURRENT_USER, kSettingsKey, 0, nullptr, 0, KEY_WRITE, nullptr, &key,
+                        nullptr) == ERROR_SUCCESS) {
+        RegSetValueExW(key, name, 0, REG_DWORD, reinterpret_cast<const BYTE*>(&value), sizeof(value));
+        RegCloseKey(key);
+    }
 }
 
 std::wstring FormatDuration(double sec) {
@@ -135,7 +168,7 @@ bool Island::Create(HINSTANCE instance) {
     RegisterClassExW(&wc);
 
     hwnd_ = CreateWindowExW(
-        WS_EX_LAYERED | WS_EX_TOPMOST | WS_EX_TOOLWINDOW | WS_EX_NOACTIVATE,
+        WS_EX_LAYERED | WS_EX_TRANSPARENT | WS_EX_TOPMOST | WS_EX_TOOLWINDOW | WS_EX_NOACTIVATE,
         wc.lpszClassName, L"Dynamis Island", WS_POPUP, 0, 0, 1, 1, nullptr, nullptr, instance,
         this);
     if (!hwnd_) return false;
@@ -158,9 +191,12 @@ bool Island::Create(HINSTANCE instance) {
 
     SetTimer(hwnd_, kTimerTick, 1000, nullptr);
     SetTimer(hwnd_, kTimerLook, 100, nullptr);
+    SetTimer(hwnd_, kTimerUpdateCheck, 20 * 1000, nullptr);  // açılıştan 20 sn sonra, sonra 6 saatte bir
+    RegisterHotKey(hwnd_, kHotkeyToggle, MOD_CONTROL | MOD_ALT | MOD_NOREPEAT, 'D');
+    userHidden_ = ReadSetting(L"Hidden", 0) != 0;
     Update();
     Render();
-    ShowWindow(hwnd_, SW_SHOWNOACTIVATE);
+    ApplyVisibility();
     return true;
 }
 
@@ -242,6 +278,12 @@ void Island::Update() {
         view_ = v;
         contentAlpha_ = 0.f;
         SetTargets(v);
+        // Küçük hâlde tıklamalar alttaki pencereye (ör. tarayıcı sekmeleri) geçer.
+        bool interactive = v == View::ExpandedMedia || v == View::ExpandedIdle;
+        LONG_PTR ex = GetWindowLongPtrW(hwnd_, GWL_EXSTYLE);
+        LONG_PTR want = interactive ? (ex & ~static_cast<LONG_PTR>(WS_EX_TRANSPARENT))
+                                    : (ex | WS_EX_TRANSPARENT);
+        if (want != ex) SetWindowLongPtrW(hwnd_, GWL_EXSTYLE, want);
     }
     StartAnimation();
 }
@@ -303,14 +345,19 @@ void Island::OnAnimationTick() {
     }
 }
 
-void Island::ShowAlert(AlertKind kind) {
+void Island::ShowAlert(AlertKind kind, int value, UINT durationMs) {
     alertKind_ = kind;
+    alertValue_ = value;
     alertActive_ = true;
-    SetTimer(hwnd_, kTimerAlert, 3000, nullptr);
+    if (durationMs) SetTimer(hwnd_, kTimerAlert, durationMs, nullptr);
+    else KillTimer(hwnd_, kTimerAlert);
     double now = Now();
     lastActivity_ = now;
     if (kind == AlertKind::Charging) eyes_.SetMood(Eyes::Mood::Happy, now, 4.5);
     if (kind == AlertKind::LowBattery) eyes_.SetMood(Eyes::Mood::Sleepy, now, 4.5);
+    if (kind == AlertKind::UpToDate || kind == AlertKind::UpdateAvailable)
+        eyes_.SetMood(Eyes::Mood::Happy, now, 4.0);
+    if (kind == AlertKind::UpdateFailed) eyes_.SetMood(Eyes::Mood::Dizzy, now, 2.0);
     Update();
 }
 
@@ -342,15 +389,29 @@ void Island::CheckFullscreen() {
         fullscreen = state == QUNS_BUSY || state == QUNS_RUNNING_D3D_FULL_SCREEN ||
                      state == QUNS_PRESENTATION_MODE;
     }
-    if (fullscreen && !hidden_) {
+    if (fullscreen != fullscreen_) {
+        fullscreen_ = fullscreen;
+        ApplyVisibility();
+    }
+}
+
+void Island::ApplyVisibility() {
+    bool hide = userHidden_ || fullscreen_;
+    if (hide && !hidden_) {
         hidden_ = true;
         ShowWindow(hwnd_, SW_HIDE);
-    } else if (!fullscreen && hidden_) {
+    } else if (!hide && (hidden_ || !IsWindowVisible(hwnd_))) {
         hidden_ = false;
         Render();
         ShowWindow(hwnd_, SW_SHOWNOACTIVATE);
         StartAnimation();
     }
+}
+
+void Island::ToggleUserHidden() {
+    userHidden_ = !userHidden_;
+    WriteSetting(L"Hidden", userHidden_ ? 1 : 0);
+    ApplyVisibility();
 }
 
 // ---------------------------------------------------------------------------
@@ -406,6 +467,8 @@ bool Island::EnsureResources() {
         fIcon_ = MakeFormat(f, icons, 18.f, DWRITE_FONT_WEIGHT_NORMAL, aC, false);
         fIconBig_ = MakeFormat(f, icons, 26.f, DWRITE_FONT_WEIGHT_NORMAL, aC, false);
         fIconSmall_ = MakeFormat(f, icons, 12.f, DWRITE_FONT_WEIGHT_NORMAL, aC, false);
+        fTiny_ = MakeFormat(f, ui, 11.5f, DWRITE_FONT_WEIGHT_SEMI_BOLD, aL, false);
+        fTinyRight_ = MakeFormat(f, ui, 11.5f, DWRITE_FONT_WEIGHT_NORMAL, aT, false);
         fAlert_ = MakeFormat(f, ui, 13.5f, DWRITE_FONT_WEIGHT_SEMI_BOLD, aL, true);
         fAlertRight_ = MakeFormat(f, ui, 13.5f, DWRITE_FONT_WEIGHT_SEMI_BOLD, aT, false);
         if (!fClock_) return false;
@@ -546,7 +609,12 @@ void Island::DrawBars(float right, float centerY, float maxHeight, float barWidt
 }
 
 void Island::DrawIdle(float w, float h) {
-    eyes_.Draw(rt_.Get(), d2d_.Get(), brush_.Get(), roundStroke_.Get(), w / 2, h / 2, 1.f, 0.f);
+    // Boştayken sade: saat ve tarih. Üzerine gelince gözlü ada açılır.
+    SYSTEMTIME st;
+    GetLocalTime(&st);
+    Text(FormatClock(st).c_str(), fTiny_.Get(), D2D1::RectF(12, 0, w / 2, h), kWhite);
+    Text(FormatShortDate(st).c_str(), fTinyRight_.Get(), D2D1::RectF(w / 2 - 24, 0, w - 12, h),
+         kGray);
 }
 
 void Island::DrawCompactMedia(float w, float h) {
@@ -625,6 +693,24 @@ void Island::DrawExpandedIdle(float w, float h) {
 }
 
 void Island::DrawAlert(float w, float h) {
+    if (alertKind_ >= AlertKind::UpdateAvailable) {
+        const wchar_t* glyph = kGlyphSync;
+        const wchar_t* label = L"";
+        D2D1_COLOR_F color = accent_;
+        switch (alertKind_) {
+        case AlertKind::UpdateAvailable: label = L"Yeni sürüm var"; color = kGreen; break;
+        case AlertKind::Updating: label = L"Güncelleniyor..."; break;
+        case AlertKind::UpToDate: label = L"En güncel sürüm"; glyph = kGlyphCheck; color = kGreen; break;
+        case AlertKind::UpdateFailed: label = L"Güncelleme başarısız"; glyph = kGlyphError; color = kRed; break;
+        default: break;
+        }
+        Text(glyph, fIcon_.Get(), D2D1::RectF(12, 0, 40, h), color);
+        Text(label, fAlert_.Get(), D2D1::RectF(46, 0, w - 70, h), kWhite);
+        wchar_t buf[16];
+        swprintf_s(buf, L"v%d", alertValue_);
+        if (alertValue_ > 0) Text(buf, fAlertRight_.Get(), D2D1::RectF(w - 80, 0, w - 18, h), color);
+        return;
+    }
     SYSTEM_POWER_STATUS ps{};
     GetSystemPowerStatus(&ps);
     int pct = ps.BatteryLifePercent <= 100 ? ps.BatteryLifePercent : 0;
@@ -660,11 +746,11 @@ void Island::OnClick(float x, float y) {
         }
         return;
     }
-    if (view_ == View::Idle || view_ == View::ExpandedIdle) {
+    if (view_ == View::ExpandedIdle) {
         Pet();
         return;
     }
-    if (view_ == View::Media) {
+    if (view_ == View::Media || view_ == View::Idle) {
         // Dokunmatik ekran / hızlı tık: hemen aç.
         KillTimer(hwnd_, kTimerHover);
         hover_ = true;
@@ -729,6 +815,39 @@ void Island::OnLookTimer() {
         eyes_.SetMood(Eyes::Mood::Sleepy, now, 0);
     }
 
+    // Fare adanın üstünde biraz durursa açılır; hızlıca geçip tıklayınca açılmaz.
+    float halfW = width_.value * scale_ / 2.f, top = monitor_.top + kTopMargin * scale_;
+    float pad = (hover_ ? 10.f : 0.f) * scale_;
+    bool over = pt.x >= cx - halfW - pad && pt.x <= cx + halfW + pad && pt.y >= monitor_.top &&
+                pt.y <= top + height_.value * scale_ + pad;
+    bool buttonDown = (GetAsyncKeyState(VK_LBUTTON) & 0x8000) || (GetAsyncKeyState(VK_RBUTTON) & 0x8000);
+    if (!hover_) {
+        if (over && !buttonDown) {
+            if (hoverSince_ == 0) {
+                hoverSince_ = now;
+                if (eyes_.CurrentMood() == Eyes::Mood::Normal || eyes_.CurrentMood() == Eyes::Mood::Sleepy)
+                    eyes_.SetMood(Eyes::Mood::Surprised, now, 0.45);
+            } else if (now - hoverSince_ >= 0.45) {
+                hover_ = true;
+                hoverSince_ = 0;
+                outsideSince_ = 0;
+                Update();
+            }
+        } else {
+            hoverSince_ = 0;
+        }
+    } else {
+        if (over) {
+            outsideSince_ = 0;
+        } else if (outsideSince_ == 0) {
+            outsideSince_ = now;
+        } else if (now - outsideSince_ >= 0.35) {
+            hover_ = false;
+            outsideSince_ = 0;
+            Update();
+        }
+    }
+
     eyes_.LookAt(dx / (700.f * scale_), dy / (380.f * scale_));
     if (eyes_.Tick(now) && ViewShowsEyes()) StartAnimation();
 }
@@ -751,10 +870,25 @@ void Island::AddTrayIcon() {
 
 void Island::ShowTrayMenu() {
     HMENU menu = CreatePopupMenu();
-    AppendMenuW(menu, MF_STRING | MF_GRAYED, 0, L"Dynamis Island");
+    wchar_t title[64];
+    swprintf_s(title, L"Dynamis Island  v%d", Updater::kCurrentVersion);
+    AppendMenuW(menu, MF_STRING | MF_GRAYED, 0, title);
     AppendMenuW(menu, MF_SEPARATOR, 0, nullptr);
-    AppendMenuW(menu, MF_STRING | (IsAutostartEnabled() ? MF_CHECKED : 0), kCmdAutostart,
+    AppendMenuW(menu, MF_STRING, kCmdToggle,
+                userHidden_ ? L"Adayı göster\tCtrl+Alt+D" : L"Adayı gizle\tCtrl+Alt+D");
+
+    HMENU settings = CreatePopupMenu();
+    AppendMenuW(settings, MF_STRING | (IsAutostartEnabled() ? MF_CHECKED : 0), kCmdAutostart,
                 L"Windows ile başlat");
+    wchar_t updateLabel[64];
+    if (availableVersion_ > Updater::kCurrentVersion)
+        swprintf_s(updateLabel, L"Güncelleştir (v%d hazır)", availableVersion_);
+    else
+        wcscpy_s(updateLabel, L"Güncelleştir");
+    AppendMenuW(settings, MF_STRING, kCmdUpdate, updateLabel);
+    AppendMenuW(menu, MF_POPUP, reinterpret_cast<UINT_PTR>(settings), L"Ayarlar");
+
+    AppendMenuW(menu, MF_SEPARATOR, 0, nullptr);
     AppendMenuW(menu, MF_STRING, kCmdExit, L"Çıkış");
     POINT pt;
     GetCursorPos(&pt);
@@ -763,6 +897,12 @@ void Island::ShowTrayMenu() {
                               hwnd_, nullptr);
     DestroyMenu(menu);
     if (cmd == kCmdAutostart) SetAutostart(!IsAutostartEnabled());
+    if (cmd == kCmdToggle) ToggleUserHidden();
+    if (cmd == kCmdUpdate) {
+        if (userHidden_) ToggleUserHidden();  // ilerlemeyi adada göster
+        ShowAlert(AlertKind::Updating, availableVersion_, 0);
+        Updater::CheckAsync(hwnd_, true);
+    }
     if (cmd == kCmdExit) DestroyWindow(hwnd_);
 }
 
@@ -816,32 +956,6 @@ LRESULT Island::WndProc(UINT msg, WPARAM wp, LPARAM lp) {
     case WM_MOUSEACTIVATE:
         return MA_NOACTIVATE;  // tıklayınca açık uygulamanın odağını çalma
 
-    case WM_MOUSEMOVE:
-        if (!trackingMouse_) {
-            TRACKMOUSEEVENT tme{sizeof(tme), TME_LEAVE, hwnd_, 0};
-            TrackMouseEvent(&tme);
-            trackingMouse_ = true;
-        }
-        KillTimer(hwnd_, kTimerCollapse);
-        if (!hover_ && !hoverPending_) {
-            hoverPending_ = true;
-            // Boş adada gözlerle oynanabilsin diye açılma biraz daha geç.
-            SetTimer(hwnd_, kTimerHover, snapshot_.hasSession ? 220 : 600, nullptr);
-            if (eyes_.CurrentMood() == Eyes::Mood::Normal ||
-                eyes_.CurrentMood() == Eyes::Mood::Sleepy)
-                eyes_.SetMood(Eyes::Mood::Surprised, Now(), 0.45);
-            lastActivity_ = Now();
-            StartAnimation();
-        }
-        return 0;
-
-    case WM_MOUSELEAVE:
-        trackingMouse_ = false;
-        hoverPending_ = false;
-        KillTimer(hwnd_, kTimerHover);
-        if (hover_) SetTimer(hwnd_, kTimerCollapse, 350, nullptr);
-        return 0;
-
     case WM_LBUTTONUP:
         OnClick(GET_X_LPARAM(lp) / scale_, GET_Y_LPARAM(lp) / scale_);
         return 0;
@@ -850,6 +964,10 @@ LRESULT Island::WndProc(UINT msg, WPARAM wp, LPARAM lp) {
         switch (wp) {
         case kTimerAnim: OnAnimationTick(); break;
         case kTimerLook: OnLookTimer(); break;
+        case kTimerUpdateCheck:
+            SetTimer(hwnd_, kTimerUpdateCheck, 6 * 3600 * 1000, nullptr);
+            Updater::CheckAsync(hwnd_, false);
+            break;
         case kTimerHover:
             KillTimer(hwnd_, kTimerHover);
             hoverPending_ = false;
@@ -925,9 +1043,43 @@ LRESULT Island::WndProc(UINT msg, WPARAM wp, LPARAM lp) {
 
     case kTrayMsg:
         if (LOWORD(lp) == WM_RBUTTONUP || LOWORD(lp) == WM_CONTEXTMENU) ShowTrayMenu();
+        if (LOWORD(lp) == WM_LBUTTONUP) ToggleUserHidden();
         return 0;
 
+    case WM_HOTKEY:
+        if (wp == kHotkeyToggle) ToggleUserHidden();
+        return 0;
+
+    case Updater::WM_UPDATE_RESULT: {
+        auto result = static_cast<Updater::Result>(wp);
+        int version = static_cast<int>(lp);
+        bool userAsked = alertActive_ && alertKind_ == AlertKind::Updating;
+        switch (result) {
+        case Updater::Result::Installed:
+            if (Updater::RelaunchUpdated()) {
+                DestroyWindow(hwnd_);  // yeni sürüm açılıyor
+            } else {
+                ShowAlert(AlertKind::UpdateFailed, version, 3500);
+            }
+            break;
+        case Updater::Result::Available:
+            if (version != availableVersion_) {
+                availableVersion_ = version;
+                ShowAlert(AlertKind::UpdateAvailable, version, 4500);
+            }
+            break;
+        case Updater::Result::UpToDate:
+            if (userAsked) ShowAlert(AlertKind::UpToDate, Updater::kCurrentVersion, 3000);
+            break;
+        case Updater::Result::Failed:
+            if (userAsked) ShowAlert(AlertKind::UpdateFailed, 0, 3500);
+            break;
+        }
+        return 0;
+    }
+
     case WM_DESTROY: {
+        UnregisterHotKey(hwnd_, kHotkeyToggle);
         NOTIFYICONDATAW nid{sizeof(nid)};
         nid.hWnd = hwnd_;
         nid.uID = kTrayId;

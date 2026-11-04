@@ -11,13 +11,16 @@ add_executable(DynamisIsland WIN32
     src/Island.cpp
     src/MediaService.cpp
     src/Eyes.cpp
+    src/Updater.cpp
     src/Island.h
     src/MediaService.h
     src/Spring.h
     src/Eyes.h
+    src/Updater.h
 )
 
-target_compile_definitions(DynamisIsland PRIVATE UNICODE _UNICODE NOMINMAX WIN32_LEAN_AND_MEAN)
+set(APP_VERSION 0 CACHE STRING "Sürüm numarası (CI çalıştırma numarası)")
+target_compile_definitions(DynamisIsland PRIVATE APP_VERSION=${APP_VERSION} UNICODE _UNICODE NOMINMAX WIN32_LEAN_AND_MEAN)
 target_compile_options(DynamisIsland PRIVATE /utf-8 /W4 /permissive- /bigobj)
 target_link_libraries(DynamisIsland PRIVATE
-    d2d1 dwrite windowscodecs shcore windowsapp shell32 advapi32 user32 gdi32 ole32)
+    d2d1 dwrite windowscodecs winhttp shcore windowsapp shell32 advapi32 user32 gdi32 ole32)

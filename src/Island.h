@@ -20,7 +20,7 @@ public:
 
 private:
     enum class View { Idle, Media, ExpandedMedia, ExpandedIdle, Alert };
-    enum class AlertKind { Charging, Unplugged, LowBattery };
+    enum class AlertKind { Charging, Unplugged, LowBattery, UpdateAvailable, Updating, UpToDate, UpdateFailed };
 
     static LRESULT CALLBACK StaticWndProc(HWND, UINT, WPARAM, LPARAM);
     LRESULT WndProc(UINT msg, WPARAM wp, LPARAM lp);
@@ -35,7 +35,9 @@ private:
     void UpdateMonitor();
     void UpdateDpi(UINT dpi);
     void CheckFullscreen();
-    void ShowAlert(AlertKind kind);
+    void ShowAlert(AlertKind kind, int value = 0, UINT durationMs = 3000);
+    void ApplyVisibility();
+    void ToggleUserHidden();
     void OnPowerChanged(bool initial);
 
     // Çizim
@@ -73,7 +75,9 @@ private:
     // Monitör / DPI
     float scale_ = 1.f;
     RECT monitor_{};
-    bool hidden_ = false;
+    bool hidden_ = false;      // pencere şu an gizli mi
+    bool userHidden_ = false;  // kullanıcı gizledi
+    bool fullscreen_ = false;  // tam ekran uygulama var
 
     // GDI yüzeyi
     HDC memDC_ = nullptr;
@@ -90,7 +94,7 @@ private:
     Microsoft::WRL::ComPtr<ID2D1Bitmap> artBitmap_;
     Microsoft::WRL::ComPtr<ID2D1StrokeStyle> roundStroke_;
     Microsoft::WRL::ComPtr<IDWriteTextFormat> fClock_, fTitle_, fArtist_, fSmall_, fSmallRight_,
-        fBigClock_, fDate_, fIcon_, fIconBig_, fIconSmall_, fAlert_, fAlertRight_;
+        fBigClock_, fDate_, fTiny_, fTinyRight_, fIcon_, fIconBig_, fIconSmall_, fAlert_, fAlertRight_;
 
     // Animasyon
     Spring width_, height_, radius_, shake_;
@@ -109,8 +113,12 @@ private:
     bool hover_ = false;
     bool trackingMouse_ = false;
     bool hoverPending_ = false;
+    double hoverSince_ = 0;
+    double outsideSince_ = 0;
     bool alertActive_ = false;
     AlertKind alertKind_ = AlertKind::Charging;
+    int alertValue_ = 0;
+    int availableVersion_ = 0;
     int lastAc_ = -1;
     bool lowBatteryShown_ = false;
     int lastMinute_ = -1;
