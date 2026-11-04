@@ -704,7 +704,10 @@ void Island::DrawAlert(float w, float h) {
         Text(glyph, fIcon_.Get(), D2D1::RectF(12, 0, 40, h), color);
         Text(label, fAlert_.Get(), D2D1::RectF(46, 0, w - 70, h), kWhite);
         wchar_t buf[16];
-        swprintf_s(buf, L"v%d", alertValue_);
+        if (alertKind_ == AlertKind::UpdateFailed)
+            swprintf_s(buf, L"hata %d", alertValue_);
+        else
+            swprintf_s(buf, L"v%d", alertValue_);
         if (alertValue_ > 0) Text(buf, fAlertRight_.Get(), D2D1::RectF(w - 80, 0, w - 18, h), color);
         return;
     }
@@ -1076,11 +1079,15 @@ LRESULT Island::WndProc(UINT msg, WPARAM wp, LPARAM lp) {
             if (Updater::RelaunchUpdated()) {
                 DestroyWindow(hwnd_);  // yeni sürüm açılıyor
             } else {
-                ShowAlert(AlertKind::UpdateFailed, version, 3500);
+                ShowAlert(AlertKind::UpdateFailed, 8, 5000);
             }
             break;
         case Updater::Result::Available:
-            if (version != availableVersion_) {
+            if (userAsked) {
+                // Arka plandaki kontrol, kullanıcının isteğiyle çakıştı: şimdi kur.
+                availableVersion_ = version;
+                Updater::CheckAsync(hwnd_, true);
+            } else if (version != availableVersion_) {
                 availableVersion_ = version;
                 ShowAlert(AlertKind::UpdateAvailable, version, 4500);
             }
@@ -1089,7 +1096,7 @@ LRESULT Island::WndProc(UINT msg, WPARAM wp, LPARAM lp) {
             if (userAsked) ShowAlert(AlertKind::UpToDate, Updater::kCurrentVersion, 3000);
             break;
         case Updater::Result::Failed:
-            if (userAsked) ShowAlert(AlertKind::UpdateFailed, 0, 3500);
+            if (userAsked) ShowAlert(AlertKind::UpdateFailed, version, 5000);  // version = hata adımı
             break;
         }
         return 0;
