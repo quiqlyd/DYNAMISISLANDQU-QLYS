@@ -5,7 +5,9 @@
 #include <wincodec.h>
 #include <wrl/client.h>
 #include <chrono>
+#include <string>
 
+#include "Eyes.h"
 #include "MediaService.h"
 #include "Spring.h"
 
@@ -53,6 +55,10 @@ private:
 
     // Girdi
     void OnClick(float x, float y);
+    void OnLookTimer();
+    void Pet();
+    double Now() const;
+    bool ViewShowsEyes() const;
 
     // Tepsi
     void AddTrayIcon();
@@ -82,11 +88,12 @@ private:
     Microsoft::WRL::ComPtr<ID2D1DCRenderTarget> rt_;
     Microsoft::WRL::ComPtr<ID2D1SolidColorBrush> brush_;
     Microsoft::WRL::ComPtr<ID2D1Bitmap> artBitmap_;
+    Microsoft::WRL::ComPtr<ID2D1StrokeStyle> roundStroke_;
     Microsoft::WRL::ComPtr<IDWriteTextFormat> fClock_, fTitle_, fArtist_, fSmall_, fSmallRight_,
         fBigClock_, fDate_, fIcon_, fIconBig_, fIconSmall_, fAlert_, fAlertRight_;
 
     // Animasyon
-    Spring width_, height_, radius_;
+    Spring width_, height_, radius_, shake_;
     float contentAlpha_ = 1.f;
     View view_ = View::Idle;
     bool animating_ = false;
@@ -101,9 +108,17 @@ private:
     D2D1_COLOR_F accent_{0.62f, 0.80f, 1.f, 1.f};
     bool hover_ = false;
     bool trackingMouse_ = false;
+    bool hoverPending_ = false;
     bool alertActive_ = false;
     AlertKind alertKind_ = AlertKind::Charging;
     int lastAc_ = -1;
     bool lowBatteryShown_ = false;
     int lastMinute_ = -1;
+
+    // Gözler
+    Eyes eyes_;
+    double lastActivity_ = 0;
+    double clickTimes_[4]{};
+    int clickIndex_ = 0;
+    std::wstring lastTitle_;
 };

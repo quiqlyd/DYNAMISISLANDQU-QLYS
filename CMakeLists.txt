@@ -10,9 +10,11 @@ add_executable(DynamisIsland WIN32
     src/main.cpp
     src/Island.cpp
     src/MediaService.cpp
+    src/Eyes.cpp
     src/Island.h
     src/MediaService.h
     src/Spring.h
+    src/Eyes.h
 )
 
 target_compile_definitions(DynamisIsland PRIVATE UNICODE _UNICODE NOMINMAX WIN32_LEAN_AND_MEAN)

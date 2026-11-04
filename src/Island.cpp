@@ -22,6 +22,7 @@ constexpr UINT_PTR kTimerTick = 2;
 constexpr UINT_PTR kTimerHover = 3;
 constexpr UINT_PTR kTimerCollapse = 4;
 constexpr UINT_PTR kTimerAlert = 5;
+constexpr UINT_PTR kTimerLook = 6;
 
 constexpr UINT kTrayMsg = WM_APP + 2;
 constexpr UINT kTrayId = 1;
@@ -145,6 +146,9 @@ bool Island::Create(HINSTANCE instance) {
     UpdateDpi(GetDpiForWindow(hwnd_));
 
     width_.Snap(kIdle.w);
+    shake_.stiffness = 700.f;
+    shake_.damping = 9.f;
+    lastActivity_ = Now();
     height_.Snap(kIdle.h);
     radius_.Snap(kIdle.r);
 
@@ -153,6 +157,7 @@ bool Island::Create(HINSTANCE instance) {
     AddTrayIcon();
 
     SetTimer(hwnd_, kTimerTick, 1000, nullptr);
+    SetTimer(hwnd_, kTimerLook, 100, nullptr);
     Update();
     Render();
     ShowWindow(hwnd_, SW_SHOWNOACTIVATE);
@@ -271,6 +276,12 @@ void Island::OnAnimationTick() {
         moving |= width_.Step(step);
         moving |= height_.Step(step);
         moving |= radius_.Step(step);
+        moving |= shake_.Step(step);
+    }
+    {
+        double now = Now();
+        for (float left = dt; left > 0; left -= 1.f / 240.f)
+            moving |= eyes_.Step(now, std::min(left, 1.f / 240.f));
     }
     if (contentAlpha_ < 1.f) {
         // İçerik, şekil hedefe yaklaşınca belirir.
@@ -296,6 +307,10 @@ void Island::ShowAlert(AlertKind kind) {
     alertKind_ = kind;
     alertActive_ = true;
     SetTimer(hwnd_, kTimerAlert, 3000, nullptr);
+    double now = Now();
+    lastActivity_ = now;
+    if (kind == AlertKind::Charging) eyes_.SetMood(Eyes::Mood::Happy, now, 4.5);
+    if (kind == AlertKind::LowBattery) eyes_.SetMood(Eyes::Mood::Sleepy, now, 4.5);
     Update();
 }
 
@@ -395,9 +410,14 @@ bool Island::EnsureResources() {
         fAlertRight_ = MakeFormat(f, ui, 13.5f, DWRITE_FONT_WEIGHT_SEMI_BOLD, aT, false);
         if (!fClock_) return false;
     }
+    if (!roundStroke_) {
+        auto sp = D2D1::StrokeStyleProperties(D2D1_CAP_STYLE_ROUND, D2D1_CAP_STYLE_ROUND,
+                                              D2D1_CAP_STYLE_ROUND, D2D1_LINE_JOIN_ROUND);
+        d2d_->CreateStrokeStyle(&sp, nullptr, 0, &roundStroke_);
+    }
     if (!rt_) {
         auto props = D2D1::RenderTargetProperties(
-            D2D1_RENDER_TARGET_TYPE_DEFAULT,
+            D2D1_RENDER_TARGET_TYPE_SOFTWARE,  // D3D aygıtı açmaz: onlarca MB RAM tasarrufu
             D2D1::PixelFormat(DXGI_FORMAT_B8G8R8A8_UNORM, D2D1_ALPHA_MODE_PREMULTIPLIED),
             96.f * scale_, 96.f * scale_);
         if (FAILED(d2d_->CreateDCRenderTarget(&props, &rt_))) return false;
@@ -465,7 +485,8 @@ void Island::Render() {
         return;
     }
 
-    POINT dst{(monitor_.left + monitor_.right) / 2 - pxW / 2,
+    POINT dst{(monitor_.left + monitor_.right) / 2 - pxW / 2 +
+                  static_cast<int>(std::lround(shake_.value * scale_)),
               monitor_.top + static_cast<int>(std::lround(kTopMargin * scale_))};
     SIZE size{pxW, pxH};
     POINT src{0, 0};
@@ -525,15 +546,16 @@ void Island::DrawBars(float right, float centerY, float maxHeight, float barWidt
 }
 
 void Island::DrawIdle(float w, float h) {
-    SYSTEMTIME st;
-    GetLocalTime(&st);
-    Text(FormatClock(st).c_str(), fClock_.Get(), D2D1::RectF(0, 0, w, h), WithAlpha(kWhite, 0.92f));
+    eyes_.Draw(rt_.Get(), d2d_.Get(), brush_.Get(), roundStroke_.Get(), w / 2, h / 2, 1.f, 0.f);
 }
 
 void Island::DrawCompactMedia(float w, float h) {
     float pad = 6.f, side = h - pad * 2;
     DrawArt(D2D1::RectF(pad, pad, pad + side, pad + side), 7.f);
     DrawBars(w - 14.f, h / 2, 14.f, 3.f);
+    // Müzik çalarken gözler ritimle hafifçe sallanır.
+    float bob = snapshot_.playing ? static_cast<float>(std::sin(time_ * 7.0)) * 1.6f : 0.f;
+    eyes_.Draw(rt_.Get(), d2d_.Get(), brush_.Get(), roundStroke_.Get(), w / 2, h / 2, 0.85f, bob);
 }
 
 void Island::DrawExpandedMedia(float w, float h) {
@@ -586,8 +608,9 @@ void Island::DrawBattery(float x, float y, float w, float h, int percent, bool c
 void Island::DrawExpandedIdle(float w, float h) {
     SYSTEMTIME st;
     GetLocalTime(&st);
-    Text(FormatClock(st).c_str(), fBigClock_.Get(), D2D1::RectF(26, 10, w - 100, 56), kWhite);
-    Text(FormatDate(st).c_str(), fDate_.Get(), D2D1::RectF(28, 56, w - 100, 80), kGray);
+    Text(FormatClock(st).c_str(), fBigClock_.Get(), D2D1::RectF(26, 10, w - 150, 56), kWhite);
+    Text(FormatDate(st).c_str(), fDate_.Get(), D2D1::RectF(28, 56, w - 150, 80), kGray);
+    eyes_.Draw(rt_.Get(), d2d_.Get(), brush_.Get(), roundStroke_.Get(), w - 128, h / 2, 1.6f, 0.f);
 
     SYSTEM_POWER_STATUS ps{};
     if (GetSystemPowerStatus(&ps) && !(ps.BatteryFlag & 128) && ps.BatteryLifePercent <= 100) {
@@ -637,12 +660,77 @@ void Island::OnClick(float x, float y) {
         }
         return;
     }
-    if (view_ == View::Media || view_ == View::Idle) {
+    if (view_ == View::Idle || view_ == View::ExpandedIdle) {
+        Pet();
+        return;
+    }
+    if (view_ == View::Media) {
         // Dokunmatik ekran / hızlı tık: hemen aç.
         KillTimer(hwnd_, kTimerHover);
         hover_ = true;
         Update();
     }
+}
+
+double Island::Now() const {
+    LARGE_INTEGER t;
+    QueryPerformanceCounter(&t);
+    return static_cast<double>(t.QuadPart) / static_cast<double>(qpcFreq_.QuadPart);
+}
+
+bool Island::ViewShowsEyes() const {
+    return view_ == View::Idle || view_ == View::Media || view_ == View::ExpandedIdle;
+}
+
+void Island::Pet() {
+    double now = Now();
+    lastActivity_ = now;
+    clickTimes_[clickIndex_] = now;
+    clickIndex_ = (clickIndex_ + 1) % 4;
+    double oldest = clickTimes_[clickIndex_];  // dört tık önceki zaman
+    if (oldest > 0 && now - oldest < 1.3) {
+        // Çok dürtüldü: başı döner, ada "hayır" der gibi sallanır.
+        eyes_.SetMood(Eyes::Mood::Dizzy, now, 1.6);
+        shake_.velocity += 420.f;
+        for (double& t : clickTimes_) t = 0;
+    } else {
+        eyes_.SetMood(Eyes::Mood::Happy, now, 1.4);
+        height_.velocity += 70.f;  // sevinçle zıplar
+        width_.velocity += 50.f;
+    }
+    StartAnimation();
+}
+
+void Island::OnLookTimer() {
+    if (hidden_) return;
+    double now = Now();
+    POINT pt;
+    GetCursorPos(&pt);
+    float cx = (monitor_.left + monitor_.right) / 2.f;
+    float cy = monitor_.top + (kTopMargin + height_.value / 2.f) * scale_;
+    float dx = pt.x - cx, dy = pt.y - cy;
+    float reach = 520.f * scale_;
+    bool isNear = dx * dx + dy * dy < reach * reach;
+
+    static POINT last{};
+    bool moved = pt.x != last.x || pt.y != last.y;
+    last = pt;
+
+    if (isNear && moved) {
+        if (eyes_.CurrentMood() == Eyes::Mood::Sleepy) {
+            eyes_.SetMood(Eyes::Mood::Surprised, now, 0.7);  // uyandı!
+        }
+        lastActivity_ = now;
+    }
+    if (snapshot_.playing) lastActivity_ = now;
+
+    // 90 sn kimse yoksa uyur.
+    if (now - lastActivity_ > 90 && eyes_.CurrentMood() == Eyes::Mood::Normal) {
+        eyes_.SetMood(Eyes::Mood::Sleepy, now, 0);
+    }
+
+    eyes_.LookAt(dx / (700.f * scale_), dy / (380.f * scale_));
+    if (eyes_.Tick(now) && ViewShowsEyes()) StartAnimation();
 }
 
 // ---------------------------------------------------------------------------
@@ -735,11 +823,21 @@ LRESULT Island::WndProc(UINT msg, WPARAM wp, LPARAM lp) {
             trackingMouse_ = true;
         }
         KillTimer(hwnd_, kTimerCollapse);
-        if (!hover_) SetTimer(hwnd_, kTimerHover, 220, nullptr);  // gelip geçen fare açmasın
+        if (!hover_ && !hoverPending_) {
+            hoverPending_ = true;
+            // Boş adada gözlerle oynanabilsin diye açılma biraz daha geç.
+            SetTimer(hwnd_, kTimerHover, snapshot_.hasSession ? 220 : 600, nullptr);
+            if (eyes_.CurrentMood() == Eyes::Mood::Normal ||
+                eyes_.CurrentMood() == Eyes::Mood::Sleepy)
+                eyes_.SetMood(Eyes::Mood::Surprised, Now(), 0.45);
+            lastActivity_ = Now();
+            StartAnimation();
+        }
         return 0;
 
     case WM_MOUSELEAVE:
         trackingMouse_ = false;
+        hoverPending_ = false;
         KillTimer(hwnd_, kTimerHover);
         if (hover_) SetTimer(hwnd_, kTimerCollapse, 350, nullptr);
         return 0;
@@ -751,8 +849,10 @@ LRESULT Island::WndProc(UINT msg, WPARAM wp, LPARAM lp) {
     case WM_TIMER:
         switch (wp) {
         case kTimerAnim: OnAnimationTick(); break;
+        case kTimerLook: OnLookTimer(); break;
         case kTimerHover:
             KillTimer(hwnd_, kTimerHover);
+            hoverPending_ = false;
             hover_ = true;
             Update();
             break;
@@ -791,6 +891,13 @@ LRESULT Island::WndProc(UINT msg, WPARAM wp, LPARAM lp) {
             artVersion_ = snapshot_.artVersion;
             artBitmap_.Reset();
             accent_ = AccentFromArt(snapshot_.art.Get());
+        }
+        if (snapshot_.title != lastTitle_) {
+            if (!lastTitle_.empty() || !snapshot_.title.empty()) {
+                eyes_.SetMood(Eyes::Mood::Surprised, Now(), 0.6);  // yeni şarkı!
+                lastActivity_ = Now();
+            }
+            lastTitle_ = snapshot_.title;
         }
         Update();
         return 0;
