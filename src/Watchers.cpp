@@ -3,6 +3,11 @@
 #include <shlobj.h>
 #include <mmdeviceapi.h>
 #include <endpointvolume.h>
+#include <setupapi.h>
+#include <devpropdef.h>
+#include <cfgmgr32.h>
+#include <wrl/client.h>
+#include <atomic>
 #include <algorithm>
 #include <cwctype>
 #include <initializer_list>
@@ -273,4 +278,144 @@ float AudioMeter::Peak(double now) {
         return -1.f;
     }
     return peak;
+}
+
+// ---------------------------------------------------------------------------
+// Ses düzeyi
+// ---------------------------------------------------------------------------
+
+namespace {
+class VolumeCallback : public IAudioEndpointVolumeCallback, public IMMNotificationClient {
+public:
+    explicit VolumeCallback(HWND hwnd) : hwnd_(hwnd) {}
+    HRESULT STDMETHODCALLTYPE QueryInterface(REFIID riid, void** out) override {
+        if (riid == IID_IUnknown || riid == __uuidof(IAudioEndpointVolumeCallback))
+            *out = static_cast<IAudioEndpointVolumeCallback*>(this);
+        else if (riid == __uuidof(IMMNotificationClient))
+            *out = static_cast<IMMNotificationClient*>(this);
+        else {
+            *out = nullptr;
+            return E_NOINTERFACE;
+        }
+        AddRef();
+        return S_OK;
+    }
+    ULONG STDMETHODCALLTYPE AddRef() override { return ++refs_; }
+    ULONG STDMETHODCALLTYPE Release() override {
+        ULONG r = --refs_;
+        if (!r) delete this;
+        return r;
+    }
+    HRESULT STDMETHODCALLTYPE OnNotify(PAUDIO_VOLUME_NOTIFICATION_DATA d) override {
+        if (d) {
+            int pct = static_cast<int>(d->fMasterVolume * 100.f + 0.5f);
+            PostMessageW(hwnd_, VolumeWatch::WM_VOLUME_CHANGED, static_cast<WPARAM>(pct), d->bMuted ? 1 : 0);
+        }
+        return S_OK;
+    }
+    HRESULT STDMETHODCALLTYPE OnDefaultDeviceChanged(EDataFlow flow, ERole role, LPCWSTR) override {
+        if (flow == eRender && role == eConsole) PostMessageW(hwnd_, VolumeWatch::WM_VOLUME_DEVICE, 0, 0);
+        return S_OK;
+    }
+    HRESULT STDMETHODCALLTYPE OnDeviceStateChanged(LPCWSTR, DWORD) override { return S_OK; }
+    HRESULT STDMETHODCALLTYPE OnDeviceAdded(LPCWSTR) override { return S_OK; }
+    HRESULT STDMETHODCALLTYPE OnDeviceRemoved(LPCWSTR) override { return S_OK; }
+    HRESULT STDMETHODCALLTYPE OnPropertyValueChanged(LPCWSTR, const PROPERTYKEY) override { return S_OK; }
+
+private:
+    HWND hwnd_;
+    std::atomic<ULONG> refs_{1};
+};
+
+Microsoft::WRL::ComPtr<IMMDeviceEnumerator> g_enum;
+Microsoft::WRL::ComPtr<IAudioEndpointVolume> g_volume;
+VolumeCallback* g_volumeCb = nullptr;
+}  // namespace
+
+void VolumeWatch::Start(HWND notify) {
+    if (FAILED(CoCreateInstance(__uuidof(MMDeviceEnumerator), nullptr, CLSCTX_INPROC_SERVER,
+                                IID_PPV_ARGS(&g_enum))))
+        return;
+    g_volumeCb = new VolumeCallback(notify);
+    g_enum->RegisterEndpointNotificationCallback(g_volumeCb);
+    Rebind();
+}
+
+void VolumeWatch::Rebind() {
+    if (!g_enum || !g_volumeCb) return;
+    if (g_volume) {
+        g_volume->UnregisterControlChangeNotify(g_volumeCb);
+        g_volume.Reset();
+    }
+    Microsoft::WRL::ComPtr<IMMDevice> dev;
+    if (FAILED(g_enum->GetDefaultAudioEndpoint(eRender, eConsole, &dev))) return;
+    if (FAILED(dev->Activate(__uuidof(IAudioEndpointVolume), CLSCTX_INPROC_SERVER, nullptr,
+                             reinterpret_cast<void**>(g_volume.GetAddressOf()))))
+        return;
+    g_volume->RegisterControlChangeNotify(g_volumeCb);
+}
+
+// ---------------------------------------------------------------------------
+// Bluetooth kulaklık pili
+// ---------------------------------------------------------------------------
+
+namespace {
+// Windows'un Bluetooth pil özelliği (Ayarlar > Bluetooth'ta görünen yüzde).
+const DEVPROPKEY kFriendlyName = {{0xa45c254e, 0xdf1c, 0x4efd, {0x80, 0x20, 0x67, 0xd1, 0x46, 0xa8, 0x50, 0xe0}}, 14};
+const DEVPROPKEY kBtBattery = {{0x104EA319, 0x6EE2, 0x4701, {0xBD, 0x47, 0x8D, 0xDB, 0xF4, 0x25, 0xBB, 0xE5}}, 2};
+
+bool ReadBattery(int& level, std::wstring& name) {
+    for (const wchar_t* enumerator : {L"BTHENUM", L"BTHLE", L"BTHLEDEVICE"}) {
+        HDEVINFO set = SetupDiGetClassDevsW(nullptr, enumerator, nullptr, DIGCF_PRESENT | DIGCF_ALLCLASSES);
+        if (set == INVALID_HANDLE_VALUE) continue;
+        SP_DEVINFO_DATA dev{sizeof(dev)};
+        for (DWORD i = 0; SetupDiEnumDeviceInfo(set, i, &dev); ++i) {
+            DEVPROPTYPE type = 0;
+            BYTE value = 0;
+            if (!SetupDiGetDevicePropertyW(set, &dev, &kBtBattery, &type, &value, sizeof(value), nullptr, 0) ||
+                type != DEVPROP_TYPE_BYTE || value > 100)
+                continue;
+            ULONG status = 0, problem = 0;
+            if (CM_Get_DevNode_Status(&status, &problem, dev.DevInst, 0) != CR_SUCCESS ||
+                !(status & DN_STARTED))
+                continue;  // eşleşmiş ama bağlı değil
+            wchar_t buf[256] = L"";
+            DEVPROPTYPE t2 = 0;
+            if (!SetupDiGetDevicePropertyW(set, &dev, &kFriendlyName, &t2,
+                                           reinterpret_cast<BYTE*>(buf), sizeof(buf), nullptr, 0))
+                buf[0] = 0;
+            level = value;
+            name = buf;
+            // "Hands-Free AG" gibi ekleri at: sadece cihaz adı kalsın.
+            for (const wchar_t* suffix : {L" Hands-Free AG", L" Hands-Free", L" Avrcp Transport", L" Stereo"}) {
+                size_t pos = name.find(suffix);
+                if (pos != std::wstring::npos) name.erase(pos);
+            }
+            SetupDiDestroyDeviceInfoList(set);
+            return true;
+        }
+        SetupDiDestroyDeviceInfoList(set);
+    }
+    return false;
+}
+}  // namespace
+
+void BtBattery::Start(HWND notify) {
+    std::thread([notify] {
+        int lastLevel = -1;
+        std::wstring lastName;
+        for (;;) {
+            int level = 255;
+            std::wstring name;
+            if (!ReadBattery(level, name)) level = 255;
+            if (level != lastLevel || name != lastName) {
+                lastLevel = level;
+                lastName = name;
+                auto* msg = new std::wstring(name);
+                if (!PostMessageW(notify, WM_BT_BATTERY, static_cast<WPARAM>(level), reinterpret_cast<LPARAM>(msg)))
+                    delete msg;
+            }
+            Sleep(30000);
+        }
+    }).detach();
 }

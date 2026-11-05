@@ -64,3 +64,19 @@ namespace DownloadWatch {
 constexpr UINT WM_DOWNLOAD_DONE = WM_APP + 4;
 void Start(HWND notify);
 }  // namespace DownloadWatch
+
+// Ses düzeyi değişince haber verir (Windows'un ses olayları; yoklama yok).
+// wParam = yüzde (0-100), lParam = sessiz mi.
+namespace VolumeWatch {
+constexpr UINT WM_VOLUME_CHANGED = WM_APP + 5;
+constexpr UINT WM_VOLUME_DEVICE = WM_APP + 6;  // varsayılan hoparlör değişti: Rebind çağır
+void Start(HWND notify);
+void Rebind();
+}  // namespace VolumeWatch
+
+// Bluetooth kulaklık pili: arka planda 30 sn'de bir bakar, değişince haber verir.
+// wParam = pil yüzdesi (bağlı cihaz yoksa 255), lParam = new std::wstring(ad); alıcı siler.
+namespace BtBattery {
+constexpr UINT WM_BT_BATTERY = WM_APP + 7;
+void Start(HWND notify);
+}  // namespace BtBattery

@@ -28,9 +28,11 @@ constexpr UINT_PTR kTimerCollapse = 4;
 constexpr UINT_PTR kTimerAlert = 5;
 constexpr UINT_PTR kTimerLook = 6;
 constexpr UINT_PTR kTimerUpdateCheck = 7;
+constexpr UINT_PTR kTimerTint = 8;
 constexpr int kHotkeyToggle = 1;
 constexpr int kHotkeyCommand = 2;
 constexpr int kHotkeyShot = 3;
+constexpr int kHotkeyPicker = 4;
 
 constexpr UINT kTrayMsg = WM_APP + 2;
 constexpr UINT kTrayId = 1;
@@ -44,6 +46,8 @@ constexpr UINT kCmdCancelTimer = 106;
 constexpr UINT kCmdCommand = 107;
 constexpr UINT kCmdShot = 108;
 constexpr UINT kCmdClearShelf = 109;
+constexpr UINT kCmdPicker = 110;
+constexpr UINT kCmdVolumeOsd = 111;
 constexpr wchar_t kSettingsKey[] = L"Software\\DynamisIsland";
 
 constexpr float kTopMargin = 4.f;
@@ -60,6 +64,7 @@ constexpr Size3 kTimer{128, 24, 12};
 constexpr Size3 kDownload{340, 46, 23};
 constexpr Size3 kShot{360, 92, 28};
 constexpr Size3 kDrop{260, 46, 23};
+constexpr Size3 kPicker{220, 40, 20};
 constexpr float kShelfH = 58.f, kShelfCell = 58.f;
 constexpr int kShelfMax = 8, kShelfShown = 5;
 constexpr float kCommandW = 420.f, kCommandRow = 26.f, kCommandBar = 48.f;
@@ -79,6 +84,9 @@ constexpr wchar_t kGlyphDownload[] = L"\xE896";
 constexpr wchar_t kGlyphWarning[] = L"\xE7BA";
 constexpr wchar_t kGlyphGlobe[] = L"\xE774";
 constexpr wchar_t kGlyphClose[] = L"\xE711";
+constexpr wchar_t kGlyphVolume[] = L"\xE767";
+constexpr wchar_t kGlyphMute[] = L"\xE74F";
+constexpr wchar_t kGlyphHeadphone[] = L"\xE7F6";
 
 constexpr wchar_t kRunKey[] = L"Software\\Microsoft\\Windows\\CurrentVersion\\Run";
 constexpr wchar_t kRunValue[] = L"DynamisIsland";
@@ -300,6 +308,11 @@ bool Island::Create(HINSTANCE instance) {
     RegisterHotKey(hwnd_, kHotkeyToggle, MOD_CONTROL | MOD_ALT | MOD_NOREPEAT, 'D');
     RegisterHotKey(hwnd_, kHotkeyCommand, MOD_CONTROL | MOD_ALT | MOD_NOREPEAT, VK_SPACE);
     RegisterHotKey(hwnd_, kHotkeyShot, MOD_CONTROL | MOD_ALT | MOD_NOREPEAT, 'S');
+    RegisterHotKey(hwnd_, kHotkeyPicker, MOD_CONTROL | MOD_ALT | MOD_NOREPEAT, 'C');
+    startedAt_ = Now();
+    volumeOsd_ = ReadSetting(L"VolumeOsd", 1) != 0;
+    VolumeWatch::Start(hwnd_);
+    BtBattery::Start(hwnd_);
     dropTarget_ = new DropTarget(this);
     RegisterDragDrop(hwnd_, dropTarget_);
     {
@@ -379,6 +392,7 @@ void Island::UpdateDpi(UINT dpi) {
 Island::View Island::TargetView() const {
     if (commandMode_) return View::Command;
     if (dropHover_) return View::Drop;
+    if (picker_) return View::Picker;
     if (alertActive_) return View::Alert;
     bool timer = companion_.TimerActive() || companion_.Pending();
     if (hover_) {
@@ -402,6 +416,7 @@ void Island::SetTargets(View v) {
     case View::Timer: s = kTimer; break;
     case View::Command: s = {kCommandW, CommandHeight(), 24}; break;
     case View::Drop: s = kDrop; break;
+    case View::Picker: s = kPicker; break;
     }
     if ((v == View::ExpandedIdle || v == View::ExpandedMedia) && ShelfVisible()) s.h += kShelfH;
     width_.target = s.w;
@@ -560,6 +575,12 @@ void Island::ShowAlert(AlertKind kind, int value, UINT durationMs) {
         shake_.velocity += 120.f;
         break;
     case AlertKind::ReminderSet: MoodWithSound(Eyes::Mood::Happy, 1.4); break;
+    case AlertKind::Headphones:
+        MoodWithSound(Eyes::Mood::Happy, 1.6);  // kulaklık takıldı: müzik zamanı
+        height_.velocity += 80.f;
+        break;
+    case AlertKind::HeadphonesLow: MoodWithSound(Eyes::Mood::Sad, 2.5); break;
+    case AlertKind::Copied: MoodWithSound(Eyes::Mood::Happy, 1.4); break;
     case AlertKind::Screenshot:
         eyes_.SetMood(Eyes::Mood::Wink, now, 1.2);  // "çektim!"
         Sounds::Play(Sounds::Sound::Shutter);
@@ -754,6 +775,7 @@ void Island::Render() {
     case View::Timer: DrawTimer(w, h); break;
     case View::Command: DrawCommand(w, h); break;
     case View::Drop: DrawDrop(w, h); break;
+    case View::Picker: DrawPicker(w, h); break;
     }
     if ((view_ == View::ExpandedIdle || view_ == View::ExpandedMedia) && ShelfVisible()) DrawShelf(w);
     if (view_ == View::Idle && !shelf_.empty()) {
@@ -773,7 +795,8 @@ void Island::Render() {
     case View::ExpandedMedia: DrawPrivacyDots(w / 2 + 6.f, 9.f); break;
     case View::Alert:
     case View::Command:
-    case View::Drop: break;
+    case View::Drop:
+    case View::Picker: break;
     }
     if (layer && clip) rt_->PopLayer();
 
@@ -1026,6 +1049,10 @@ void Island::DrawAlert(float w, float h) {
         DrawScreenshot(w, h);
         return;
     }
+    if (alertKind_ == AlertKind::Volume) {
+        DrawVolume(w, h);
+        return;
+    }
     if (alertKind_ >= AlertKind::UpdateAvailable) {
         const wchar_t* glyph = kGlyphSync;
         const wchar_t* label = L"";
@@ -1043,13 +1070,17 @@ void Island::DrawAlert(float w, float h) {
         case AlertKind::Offline: label = L"İnternet gitti"; glyph = kGlyphGlobe; color = kRed; break;
         case AlertKind::Online: label = L"İnternet geri geldi"; glyph = kGlyphGlobe; color = kGreen; break;
         case AlertKind::Reminder: label = alertLabel_.c_str(); glyph = kGlyphTimer; color = kOrange; break;
-        case AlertKind::ReminderSet: label = alertLabel_.c_str(); glyph = kGlyphCheck; color = kGreen; break;
+        case AlertKind::ReminderSet:
+        case AlertKind::Copied: label = alertLabel_.c_str(); glyph = kGlyphCheck; color = kGreen; break;
+        case AlertKind::Headphones: label = alertLabel_.c_str(); glyph = kGlyphHeadphone; color = kGreen; break;
+        case AlertKind::HeadphonesLow: label = alertLabel_.c_str(); glyph = kGlyphHeadphone; color = kRed; break;
         default: break;
         }
         Text(glyph, fIcon_.Get(), D2D1::RectF(12, 0, 40, h), color);
         Text(label, fAlert_.Get(), D2D1::RectF(46, 0, w - 70, h), kWhite);
         wchar_t buf[16];
-        bool percent = alertKind_ == AlertKind::CpuBusy || alertKind_ == AlertKind::MemoryFull;
+        bool percent = alertKind_ == AlertKind::CpuBusy || alertKind_ == AlertKind::MemoryFull ||
+                       alertKind_ == AlertKind::Headphones || alertKind_ == AlertKind::HeadphonesLow;
         if (alertKind_ == AlertKind::UpdateFailed)
             swprintf_s(buf, L"hata %d", alertValue_);
         else if (percent)
@@ -1129,7 +1160,8 @@ double Island::Now() const {
 
 bool Island::ViewShowsEyes() const {
     return view_ == View::Idle || view_ == View::Media || view_ == View::ExpandedIdle ||
-           view_ == View::Timer || view_ == View::Command;
+           view_ == View::Timer || view_ == View::Command || view_ == View::Picker ||
+           (view_ == View::Alert && alertKind_ == AlertKind::Volume);
 }
 
 void Island::Pet() {
@@ -1321,10 +1353,11 @@ bool Island::DragFiles(const std::vector<std::wstring>& paths) {
     for (const auto& p : paths)
         if (PIDLIST_ABSOLUTE id = ILCreateFromPathW(p.c_str())) pidls.push_back(id);
     bool dropped = false;
+    std::vector<LPCITEMIDLIST> cpidls(pidls.begin(), pidls.end());
     ComPtr<IShellItemArray> items;
     ComPtr<IDataObject> data;
     if (!pidls.empty() &&
-        SUCCEEDED(SHCreateShellItemArrayFromIDLists(static_cast<UINT>(pidls.size()), pidls.data(), &items)) &&
+        SUCCEEDED(SHCreateShellItemArrayFromIDLists(static_cast<UINT>(pidls.size()), cpidls.data(), &items)) &&
         SUCCEEDED(items->BindToHandler(nullptr, BHID_DataObject, IID_PPV_ARGS(&data)))) {
         eyes_.SetMood(Eyes::Mood::Surprised, Now(), 0.8);
         StartAnimation();
@@ -1555,6 +1588,182 @@ void Island::DrawShelf(float w) {
         Text(more, fAlert_.Get(), D2D1::RectF(x, top + 4, x + 40, top + 32), kGray);
     }
     Text(kGlyphClose, fIconSmall_.Get(), D2D1::RectF(w - 40, top + 4, w - 16, top + 32), kGray);
+}
+
+// ---------------------------------------------------------------------------
+// Ses göstergesi, kulaklık pili, renk seçici
+// ---------------------------------------------------------------------------
+
+void Island::OnVolume(int percent, bool muted) {
+    int before = volume_;
+    bool wasMuted = muted_;
+    volume_ = percent;
+    muted_ = muted;
+    if (!volumeOsd_ || before < 0 || Now() - startedAt_ < 3 || (before == percent && wasMuted == muted)) return;
+    double now = Now();
+    // Sessize alınca kulaklarını kapatır gibi gözlerini yumar; çok açınca irkilir.
+    if ((muted || percent == 0) && !(wasMuted || before == 0)) eyes_.SetMood(Eyes::Mood::Sleepy, now, 1.4);
+    else if (!muted && percent >= 90 && before < 90) eyes_.SetMood(Eyes::Mood::Surprised, now, 0.9);
+    else if (!muted && (wasMuted || before == 0)) eyes_.SetMood(Eyes::Mood::Happy, now, 0.8);
+    ShowAlert(AlertKind::Volume, percent, 1500);
+}
+
+void Island::DrawVolume(float w, float h) {
+    eyes_.Draw(rt_.Get(), d2d_.Get(), brush_.Get(), roundStroke_.Get(), 30, h / 2, 0.68f, 0.f);
+    bool silent = muted_ || alertValue_ == 0;
+    Text(silent ? kGlyphMute : kGlyphVolume, fIcon_.Get(), D2D1::RectF(54, 0, 80, h), kWhite);
+    float x0 = 88, x1 = w - 58, cy = h / 2;
+    D2D1_ROUNDED_RECT track{D2D1::RectF(x0, cy - 3, x1, cy + 3), 3, 3};
+    brush_->SetColor(Rgba(1, 1, 1, 0.18f));
+    rt_->FillRoundedRectangle(track, brush_.Get());
+    if (!silent) {
+        float fx = x0 + (x1 - x0) * std::clamp(alertValue_, 0, 100) / 100.f;
+        D2D1_ROUNDED_RECT fill{D2D1::RectF(x0, cy - 3, std::max(x0 + 6, fx), cy + 3), 3, 3};
+        brush_->SetColor(kWhite);
+        rt_->FillRoundedRectangle(fill, brush_.Get());
+    }
+    wchar_t buf[16];
+    swprintf_s(buf, L"%%%d", silent ? 0 : alertValue_);
+    Text(buf, fAlertRight_.Get(), D2D1::RectF(x1, 0, w - 16, h), silent ? kGray : kWhite);
+}
+
+void Island::OnBtBattery(int level, const std::wstring& name) {
+    bool connectedNow = level != 255, wasConnected = btLevel_ != 255;
+    btLevel_ = level;
+    if (!connectedNow) {
+        btLowShown_ = false;
+        return;
+    }
+    btName_ = name.empty() ? L"Kulaklık" : name;
+    alertLabel_ = btName_;
+    bool quiet = Now() - startedAt_ < 10;  // açılışta zaten bağlıysa araya girme
+    if (!wasConnected && !quiet) {
+        ShowAlert(AlertKind::Headphones, level, 3500);
+    } else if (level <= 15 && !btLowShown_) {
+        btLowShown_ = true;
+        alertLabel_ = btName_ + L" · pil azaldı";
+        ShowAlert(AlertKind::HeadphonesLow, level, 4000);
+    } else if (level > 25) {
+        btLowShown_ = false;
+    }
+}
+
+namespace {
+D2D1_COLOR_F ColorOf(COLORREF c) {
+    return Rgba(GetRValue(c) / 255.f, GetGValue(c) / 255.f, GetBValue(c) / 255.f);
+}
+D2D1_COLOR_F EyeTint(COLORREF c) {
+    // Siyah zeminde kaybolmasın: koyu renkleri biraz aç.
+    D2D1_COLOR_F k = ColorOf(c);
+    float lum = 0.2126f * k.r + 0.7152f * k.g + 0.0722f * k.b;
+    if (lum < 0.35f) {
+        float t = (0.35f - lum) / 0.35f * 0.5f;
+        k.r += (1 - k.r) * t; k.g += (1 - k.g) * t; k.b += (1 - k.b) * t;
+    }
+    return k;
+}
+std::wstring Hex(COLORREF c) {
+    wchar_t buf[16];
+    swprintf_s(buf, L"#%02X%02X%02X", GetRValue(c), GetGValue(c), GetBValue(c));
+    return buf;
+}
+}  // namespace
+
+LRESULT CALLBACK Island::PickerProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
+    Island* self = reinterpret_cast<Island*>(GetWindowLongPtrW(hwnd, GWLP_USERDATA));
+    if (msg == WM_NCCREATE) {
+        self = static_cast<Island*>(reinterpret_cast<CREATESTRUCTW*>(lp)->lpCreateParams);
+        SetWindowLongPtrW(hwnd, GWLP_USERDATA, reinterpret_cast<LONG_PTR>(self));
+    }
+    if (self && self->picker_ == hwnd) {
+        switch (msg) {
+        case WM_SETCURSOR: SetCursor(LoadCursorW(nullptr, IDC_CROSS)); return TRUE;
+        case WM_MOUSEMOVE: self->OnPickerMove(); return 0;
+        case WM_LBUTTONDOWN: self->EndPicker(true); return 0;
+        case WM_RBUTTONDOWN: self->EndPicker(false); return 0;
+        case WM_KEYDOWN:
+            if (wp == VK_ESCAPE) self->EndPicker(false);
+            if (wp == VK_RETURN || wp == VK_SPACE) self->EndPicker(true);
+            return 0;
+        case WM_ACTIVATE:
+            if (LOWORD(wp) == WA_INACTIVE) PostMessageW(hwnd, WM_CLOSE, 0, 0);
+            break;
+        case WM_CLOSE: self->EndPicker(false); return 0;
+        }
+    }
+    return DefWindowProcW(hwnd, msg, wp, lp);
+}
+
+void Island::StartPicker() {
+    if (picker_) return;
+    if (commandMode_) CloseCommand(false);
+    static bool registered = false;
+    if (!registered) {
+        WNDCLASSEXW wc{sizeof(wc)};
+        wc.lpfnWndProc = PickerProc;
+        wc.hInstance = instance_;
+        wc.hCursor = LoadCursorW(nullptr, IDC_CROSS);
+        wc.hbrBackground = static_cast<HBRUSH>(GetStockObject(BLACK_BRUSH));
+        wc.lpszClassName = L"GutiColorPicker";
+        RegisterClassExW(&wc);
+        registered = true;
+    }
+    if (userHidden_) ToggleUserHidden();
+    // Tüm ekranları kaplayan, neredeyse görünmez bir katman: tıklamayı ve imleci o alır.
+    int vx = GetSystemMetrics(SM_XVIRTUALSCREEN), vy = GetSystemMetrics(SM_YVIRTUALSCREEN);
+    int vw = GetSystemMetrics(SM_CXVIRTUALSCREEN), vh = GetSystemMetrics(SM_CYVIRTUALSCREEN);
+    picker_ = CreateWindowExW(WS_EX_LAYERED | WS_EX_TOPMOST | WS_EX_TOOLWINDOW, L"GutiColorPicker", L"",
+                              WS_POPUP, vx, vy, vw, vh, nullptr, nullptr, instance_, this);
+    if (!picker_) return;
+    SetLayeredWindowAttributes(picker_, 0, 1, LWA_ALPHA);
+    ShowWindow(picker_, SW_SHOW);
+    SetForegroundWindow(picker_);
+    SetFocus(picker_);
+    SetWindowPos(hwnd_, HWND_TOPMOST, 0, 0, 0, 0, SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE);
+    eyes_.SetMood(Eyes::Mood::Curious, Now(), 1.0);
+    Sounds::Play(Sounds::Sound::Open);
+    OnPickerMove();
+    Update();
+}
+
+void Island::OnPickerMove() {
+    POINT pt;
+    GetCursorPos(&pt);
+    HDC dc = GetDC(nullptr);
+    COLORREF c = GetPixel(dc, pt.x, pt.y);
+    ReleaseDC(nullptr, dc);
+    if (c == CLR_INVALID || c == pickColor_) return;
+    pickColor_ = c;
+    D2D1_COLOR_F tint = EyeTint(c);
+    eyes_.SetTint(&tint);  // gözleri bakılan renge bürünür
+    if (!animating_) Render();
+}
+
+void Island::EndPicker(bool pick) {
+    if (!picker_) return;
+    HWND w = picker_;
+    picker_ = nullptr;
+    DestroyWindow(w);
+    if (pick) {
+        std::wstring hex = Hex(pickColor_);
+        CopyToClipboard(hex);
+        alertLabel_ = hex + L" kopyalandı";
+        ShowAlert(AlertKind::Copied, 0, 2500);
+        SetTimer(hwnd_, kTimerTint, 3000, nullptr);  // biraz renkli kalsın
+    } else {
+        eyes_.SetTint(nullptr);
+        Update();
+    }
+}
+
+void Island::DrawPicker(float w, float h) {
+    D2D1_COLOR_F c = ColorOf(pickColor_);
+    brush_->SetColor(c);
+    rt_->FillEllipse(D2D1::Ellipse(D2D1::Point2F(24, h / 2), 11, 11), brush_.Get());
+    brush_->SetColor(Rgba(1, 1, 1, 0.6f));
+    rt_->DrawEllipse(D2D1::Ellipse(D2D1::Point2F(24, h / 2), 11, 11), brush_.Get(), 1.2f);
+    Text(Hex(pickColor_).c_str(), fAlert_.Get(), D2D1::RectF(44, 0, w - 70, h), kWhite);
+    eyes_.Draw(rt_.Get(), d2d_.Get(), brush_.Get(), roundStroke_.Get(), w - 36, h / 2, 0.68f, 0.f);
 }
 
 // ---------------------------------------------------------------------------
@@ -1956,9 +2165,14 @@ void Island::AddTrayIcon() {
 
 void Island::ShowTrayMenu() {
     HMENU menu = CreatePopupMenu();
-    wchar_t title[64];
+    wchar_t title[128];
     swprintf_s(title, L"Guti  v%d   ·   dostluk %d/100", Updater::kCurrentVersion,
                companion_.Affection());
+    if (btLevel_ != 255) {
+        wchar_t extra[48];
+        swprintf_s(extra, L"   ·   kulaklık %%%d", btLevel_);
+        wcscat_s(title, extra);
+    }
     AppendMenuW(menu, MF_STRING | MF_GRAYED, 0, title);
     AppendMenuW(menu, MF_SEPARATOR, 0, nullptr);
     AppendMenuW(menu, MF_STRING, kCmdToggle,
@@ -1973,6 +2187,7 @@ void Island::ShowTrayMenu() {
     else
         wcscpy_s(updateLabel, L"Güncelleştir");
     AppendMenuW(settings, MF_STRING | (Sounds::Enabled() ? MF_CHECKED : 0), kCmdSounds, L"Sesler");
+    AppendMenuW(settings, MF_STRING | (volumeOsd_ ? MF_CHECKED : 0), kCmdVolumeOsd, L"Ses düzeyi göstergesi");
     AppendMenuW(settings, MF_STRING, kCmdUpdate, updateLabel);
     bool focusing = companion_.Kind() == Companion::TimerKind::Focus ||
                     companion_.Kind() == Companion::TimerKind::Break;
@@ -1980,6 +2195,7 @@ void Island::ShowTrayMenu() {
     swprintf_s(focusLabel, L"Odak modu başlat (%d dk)", Companion::kFocusMinutes);
     AppendMenuW(menu, MF_STRING, kCmdCommand, L"Hesap · çevir · hatırlat · pano\tCtrl+Alt+Boşluk");
     AppendMenuW(menu, MF_STRING, kCmdShot, L"Ekran görüntüsü al\tCtrl+Alt+S");
+    AppendMenuW(menu, MF_STRING, kCmdPicker, L"Ekrandan renk seç\tCtrl+Alt+C");
     if (!shelf_.empty()) AppendMenuW(menu, MF_STRING, kCmdClearShelf, L"Rafı boşalt");
     AppendMenuW(menu, MF_STRING, kCmdFocus, focusing ? L"Odak modunu bitir" : focusLabel);
     if (companion_.Kind() == Companion::TimerKind::Quick)
@@ -2022,6 +2238,11 @@ void Island::ShowTrayMenu() {
         Updater::CheckAsync(hwnd_, true);
     }
     if (cmd == kCmdShot) TakeScreenshot();
+    if (cmd == kCmdPicker) StartPicker();
+    if (cmd == kCmdVolumeOsd) {
+        volumeOsd_ = !volumeOsd_;
+        WriteSetting(L"VolumeOsd", volumeOsd_ ? 1 : 0);
+    }
     if (cmd == kCmdClearShelf) {
         shelf_.clear();
         Update();
@@ -2139,6 +2360,20 @@ LRESULT Island::WndProc(UINT msg, WPARAM wp, LPARAM lp) {
         if (LOWORD(wp) == WA_INACTIVE && commandMode_) CloseCommand(false);  // başka yere tıklandı
         break;
 
+    case VolumeWatch::WM_VOLUME_CHANGED:
+        OnVolume(static_cast<int>(wp), lp != 0);
+        return 0;
+
+    case VolumeWatch::WM_VOLUME_DEVICE:
+        VolumeWatch::Rebind();
+        return 0;
+
+    case BtBattery::WM_BT_BATTERY: {
+        std::unique_ptr<std::wstring> name(reinterpret_cast<std::wstring*>(lp));
+        OnBtBattery(static_cast<int>(wp), name ? *name : std::wstring());
+        return 0;
+    }
+
     case WM_CLIPBOARDUPDATE:
         OnClipboardUpdate();
         return 0;
@@ -2167,6 +2402,11 @@ LRESULT Island::WndProc(UINT msg, WPARAM wp, LPARAM lp) {
             KillTimer(hwnd_, kTimerCollapse);
             hover_ = false;
             Update();
+            break;
+        case kTimerTint:
+            KillTimer(hwnd_, kTimerTint);
+            eyes_.SetTint(nullptr);
+            StartAnimation();
             break;
         case kTimerAlert:
             KillTimer(hwnd_, kTimerAlert);
@@ -2270,6 +2510,7 @@ LRESULT Island::WndProc(UINT msg, WPARAM wp, LPARAM lp) {
     case WM_HOTKEY:
         if (wp == kHotkeyToggle) ToggleUserHidden();
         if (wp == kHotkeyShot) TakeScreenshot();
+        if (wp == kHotkeyPicker) StartPicker();
         if (wp == kHotkeyCommand) {
             if (commandMode_) {
                 CloseCommand(true);
@@ -2318,6 +2559,7 @@ LRESULT Island::WndProc(UINT msg, WPARAM wp, LPARAM lp) {
         UnregisterHotKey(hwnd_, kHotkeyToggle);
         UnregisterHotKey(hwnd_, kHotkeyCommand);
         UnregisterHotKey(hwnd_, kHotkeyShot);
+        UnregisterHotKey(hwnd_, kHotkeyPicker);
         RevokeDragDrop(hwnd_);
         if (dropTarget_) dropTarget_->Release();
         dropTarget_ = nullptr;

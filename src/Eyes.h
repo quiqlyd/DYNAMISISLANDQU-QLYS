@@ -43,6 +43,11 @@ public:
     bool IsAwake() const { return mood_ != Mood::Sleepy; }
     // Dostluk puanı (0-100): kendi kendine şirinliklerin sıklığını ve türünü belirler.
     void SetAffection(int a) { affection_ = a; }
+    // Gözleri bir süreliğine renklendir (ör. renk seçicide seçilen renk). nullptr: beyaza dön.
+    void SetTint(const D2D1_COLOR_F* c) {
+        tinted_ = c != nullptr;
+        if (c) tint_ = *c;
+    }
 
     // Yavaş zamanlayıcıdan çağrılır (100 ms). Bir animasyon başlatmak gerekiyorsa true.
     bool Tick(double now);
@@ -78,6 +83,8 @@ private:
         wink_, sparkle_, asym_, dizzy_, sweat_;
     int affection_ = 50;
     Mood mood_ = Mood::Normal;
+    bool tinted_ = false;
+    D2D1_COLOR_F tint_{1, 1, 1, 1};
     double moodStart_ = 0;
     double moodUntil_ = 0;
     double nextBlink_ = 0;

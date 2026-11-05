@@ -23,10 +23,10 @@ public:
     int Run();
 
 private:
-    enum class View { Idle, Media, ExpandedMedia, ExpandedIdle, Alert, Timer, Command, Drop };
+    enum class View { Idle, Media, ExpandedMedia, ExpandedIdle, Alert, Timer, Command, Drop, Picker };
     enum class AlertKind { Charging, Unplugged, LowBattery, UpdateAvailable, Updating, UpToDate, UpdateFailed, TimerDone, FocusDone, BreakDone,
                            CpuBusy, MemoryFull, Offline, Online, Download,
-                           Reminder, ReminderSet, Screenshot };
+                           Reminder, ReminderSet, Screenshot, Volume, Headphones, HeadphonesLow, Copied };
 
     static LRESULT CALLBACK StaticWndProc(HWND, UINT, WPARAM, LPARAM);
     LRESULT WndProc(UINT msg, WPARAM wp, LPARAM lp);
@@ -81,6 +81,13 @@ private:
     bool ShelfVisible() const;
     ID2D1Bitmap* ShelfIcon(size_t i);
     IWICImagingFactory* Wic();
+    // Ses göstergesi, kulaklık pili, renk seçici
+    void OnVolume(int percent, bool muted);
+    void OnBtBattery(int level, const std::wstring& name);
+    void StartPicker();
+    void EndPicker(bool pick);
+    void OnPickerMove();
+    static LRESULT CALLBACK PickerProc(HWND, UINT, WPARAM, LPARAM);
 
     // Çizim
     bool EnsureResources();
@@ -97,6 +104,8 @@ private:
     void DrawScreenshot(float w, float h);
     void DrawShelf(float w);
     void DrawDrop(float w, float h);
+    void DrawPicker(float w, float h);
+    void DrawVolume(float w, float h);
     void DrawPrivacyDots(float right, float cy);
     std::wstring TimerText() const;
     D2D1_COLOR_F TimerColor() const;
@@ -231,5 +240,15 @@ private:
     bool dropArmed_ = false;   // dışarıdan sürükleme gelirken ada tıklanabilir olur
     bool dropHover_ = false;   // dosya şu an adanın üstünde
     bool lastLeftDown_ = false, downStartedOver_ = false;
+    // Ses / kulaklık / renk
+    double startedAt_ = 0;
+    int volume_ = -1;
+    bool muted_ = false;
+    bool volumeOsd_ = true;
+    int btLevel_ = 255;
+    std::wstring btName_;
+    bool btLowShown_ = false;
+    HWND picker_ = nullptr;
+    COLORREF pickColor_ = 0;
     double swallowUpUntil_ = 0;  // indirme kartına basınca gelen bırakma tıklamasını yut
 };
