@@ -6,7 +6,9 @@
 #include <wrl/client.h>
 #include <chrono>
 #include <string>
+#include <vector>
 
+#include "Command.h"
 #include "Companion.h"
 #include "Eyes.h"
 #include "MediaService.h"
@@ -21,9 +23,10 @@ public:
     int Run();
 
 private:
-    enum class View { Idle, Media, ExpandedMedia, ExpandedIdle, Alert, Timer };
+    enum class View { Idle, Media, ExpandedMedia, ExpandedIdle, Alert, Timer, Command };
     enum class AlertKind { Charging, Unplugged, LowBattery, UpdateAvailable, Updating, UpToDate, UpdateFailed, TimerDone, FocusDone, BreakDone,
-                           CpuBusy, MemoryFull, Offline, Online, Download };
+                           CpuBusy, MemoryFull, Offline, Online, Download,
+                           Reminder, ReminderSet };
 
     static LRESULT CALLBACK StaticWndProc(HWND, UINT, WPARAM, LPARAM);
     LRESULT WndProc(UINT msg, WPARAM wp, LPARAM lp);
@@ -48,6 +51,20 @@ private:
     void OnDownload(const std::wstring& path);
     void OpenDownloadFolder();
     void StartDownloadDrag();
+    // Komut çubuğu: hesap, birim, hatırlatıcı, pano geçmişi
+    void OpenCommand();
+    void CloseCommand(bool restoreFocus);
+    void OnCommandChar(wchar_t c);
+    void OnCommandKey(UINT vk);
+    void AcceptCommand();
+    void RefreshCommandResult();
+    float CommandHeight() const;
+    int VisibleClips() const;
+    void CaptureClipboardText();
+    void CopyToClipboard(const std::wstring& text);
+    void CheckReminders();
+    void LoadReminders();
+    void SaveReminders();
     bool IsDownloadAlert() const { return alertActive_ && alertKind_ == AlertKind::Download; }
 
     // Çizim
@@ -61,6 +78,7 @@ private:
     void DrawAlert(float w, float h);
     void DrawTimer(float w, float h);
     void DrawDownload(float w, float h);
+    void DrawCommand(float w, float h);
     void DrawPrivacyDots(float right, float cy);
     std::wstring TimerText() const;
     D2D1_COLOR_F TimerColor() const;
@@ -169,5 +187,18 @@ private:
     float avgLevel_ = 0.f;   // uzun ortalama: vuruşu bunun üstündeki sıçrama belirler
     float beatPulse_ = 0.f;  // vuruştan sonra sönen zıplama
     double lastBeat_ = 0;
+    // Komut çubuğu
+    bool commandMode_ = false;
+    HWND prevForeground_ = nullptr;
+    std::wstring input_;
+    Command::Result cmdResult_;
+    int clipSel_ = 0;
+    std::vector<std::wstring> clips_;  // sadece bellekte, diske yazılmaz
+    struct Reminder {
+        ULONGLONG at;  // duvar saati, saniye
+        std::wstring text;
+    };
+    std::vector<Reminder> reminders_;
+    std::wstring alertLabel_;
     double swallowUpUntil_ = 0;  // indirme kartına basınca gelen bırakma tıklamasını yut
 };

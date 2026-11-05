@@ -15,6 +15,7 @@ add_executable(DynamisIsland WIN32
     src/Companion.cpp
     src/Sounds.cpp
     src/Watchers.cpp
+    src/Command.cpp
     src/Island.h
     src/MediaService.h
     src/Spring.h
@@ -23,6 +24,7 @@ add_executable(DynamisIsland WIN32
     src/Companion.h
     src/Sounds.h
     src/Watchers.h
+    src/Command.h
 )
 
 set(APP_VERSION 0 CACHE STRING "Sürüm numarası (CI çalıştırma numarası)")
