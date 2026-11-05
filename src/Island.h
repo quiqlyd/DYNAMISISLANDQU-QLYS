@@ -1,9 +1,13 @@
 #pragma once
 #include <windows.h>
 #include <d2d1.h>
+#include <d2d1_1.h>
+#include <d3d11.h>
+#include <dxgi1_2.h>
 #include <dwrite.h>
 #include <wincodec.h>
 #include <wrl/client.h>
+#include <atomic>
 #include <chrono>
 #include <string>
 #include <vector>
@@ -90,6 +94,22 @@ private:
     static LRESULT CALLBACK PickerProc(HWND, UINT, WPARAM, LPARAM);
 
     // Çizim
+    bool CreateGpu();
+    void FrameLoop();
+    void DrawView(View v, float w, float h);
+    void DrawShadow(float w, float h, float r);
+    float Stagger(int i) const;
+    void PushFade(float alpha, float dx, float dy, float scale = 1.f, float cx = 0, float cy = 0);
+    void PopFade();
+    struct Roll {
+        std::wstring cur, prev;
+        double at = -10;
+    };
+    void DrawRolling(Roll& roll, const std::wstring& text, IDWriteTextFormat* format, D2D1_RECT_F rect,
+                     D2D1_COLOR_F color);
+    int ButtonAt(float x, float y) const;
+    void OnMouseMove(float x, float y);
+    void UpdatePerf();
     bool EnsureResources();
     void DiscardDeviceResources();
     void Render();
@@ -151,7 +171,19 @@ private:
     // Direct2D / DirectWrite
     Microsoft::WRL::ComPtr<ID2D1Factory> d2d_;
     Microsoft::WRL::ComPtr<IDWriteFactory> dwrite_;
-    Microsoft::WRL::ComPtr<ID2D1DCRenderTarget> rt_;
+    Microsoft::WRL::ComPtr<ID2D1RenderTarget> rt_;      // çizimin yapıldığı hedef (GPU ya da yazılım)
+    Microsoft::WRL::ComPtr<ID2D1DCRenderTarget> dcRt_;  // yazılım yedeği
+    Microsoft::WRL::ComPtr<ID3D11Device> d3d_;
+    Microsoft::WRL::ComPtr<ID2D1DeviceContext> ctx_;
+    Microsoft::WRL::ComPtr<ID2D1Bitmap1> target_;
+    Microsoft::WRL::ComPtr<IDXGISurface1> surface_;
+    Microsoft::WRL::ComPtr<IDWriteTypography> tabular_;
+    bool gpu_ = false, gpuFailed_ = false;
+    struct Fade {
+        D2D1_MATRIX_3X2_F old;
+        bool layer;
+    };
+    std::vector<Fade> fades_;
     Microsoft::WRL::ComPtr<ID2D1SolidColorBrush> brush_;
     Microsoft::WRL::ComPtr<ID2D1Bitmap> artBitmap_;
     Microsoft::WRL::ComPtr<ID2D1StrokeStyle> roundStroke_;
@@ -160,10 +192,27 @@ private:
 
     // Animasyon
     Spring width_, height_, radius_, shake_;
-    float contentAlpha_ = 1.f;
     View view_ = View::Idle;
     bool animating_ = false;
-    UINT animInterval_ = 0;
+    // Kare saati: ekran yenilemesine kilitli ayrı bir iş parçacığı kare ister.
+    HANDLE frameEvent_ = nullptr;
+    std::atomic<bool> wantFrames_{false}, framePending_{false};
+    std::atomic<int> frameDivider_{1};
+    // Görünümler arası geçiş
+    View prevView_ = View::Idle;
+    float prevW_ = 78, prevH_ = 22, viewW_ = 78, viewH_ = 22;
+    float trans_ = 1.f;
+    bool drawingOld_ = false;
+    // Butonlar
+    int hoverBtn_ = -1, pressBtn_ = -1;
+    Spring btnScale_[3], btnGlow_[3];
+    bool trackingLeave_ = false;
+    Spring selY_, volBar_;
+    Roll rollClock_, rollTimer_, rollVolume_;
+    double rollUntil_ = 0;
+    // Performans
+    ULONGLONG lastProcTime_ = 0, lastWallTime_ = 0;
+    float cpuPct_ = 0;
     LARGE_INTEGER lastTick_{}, qpcFreq_{};
     double time_ = 0;  // ekolayzer çubukları için
 
