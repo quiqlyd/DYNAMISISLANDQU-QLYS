@@ -43,6 +43,9 @@ public:
     bool IsAwake() const { return mood_ != Mood::Sleepy; }
     // Dostluk puanı (0-100): kendi kendine şirinliklerin sıklığını ve türünü belirler.
     void SetAffection(int a) { affection_ = a; }
+    // Kalıcı göz rengi (kullanıcının seçtiği). Geçici renklendirme bitince buna dönülür.
+    void SetBaseColor(const D2D1_COLOR_F& c) { base_ = c; }
+    D2D1_COLOR_F BaseColor() const { return base_; }
     // Gözleri bir süreliğine renklendir (ör. renk seçicide seçilen renk). nullptr: beyaza dön.
     void SetTint(const D2D1_COLOR_F* c) {
         tinted_ = c != nullptr;
@@ -85,6 +88,7 @@ private:
     Mood mood_ = Mood::Normal;
     bool tinted_ = false;
     D2D1_COLOR_F tint_{1, 1, 1, 1};
+    D2D1_COLOR_F base_{0.93f, 0.97f, 1.f, 1.f};
     double moodStart_ = 0;
     double moodUntil_ = 0;
     double nextBlink_ = 0;

@@ -9,6 +9,9 @@ namespace isl {
 inline constexpr wchar_t kSettingsKey[] = L"Software\\DynamisIsland";
 
 constexpr float kTopMargin = 4.f;
+// Island.cpp ve Extras.cpp'nin ortak zamanlayıcıları (diğerleri Island.cpp'de, 2-8)
+constexpr UINT_PTR kTimerLyrics = 9;
+constexpr UINT_PTR kTimerSleepRestore = 10;
 // Gölge için hapın çevresinde bırakılan boşluk (yanlar ve alt).
 constexpr float kPad = 16.f, kPadBottom = 20.f;
 constexpr float kTransition = 0.38f;  // görünüm geçişi süresi (sn)
@@ -26,6 +29,9 @@ constexpr Size3 kIdle{78, 22, 11};
 constexpr Size3 kMedia{236, 34, 17};
 // Üstte büyütülmüş bir pencere (ör. tarayıcı sekmeleri) varken müzik hapı incelir.
 constexpr Size3 kMediaSlim{150, 30, 15};
+// Kapalı hapta şarkı sözü satırı varken
+constexpr Size3 kMediaLyric{340, 34, 17};
+constexpr float kLyricsH = 56.f;
 constexpr Size3 kExpandedMedia{400, 164, 40};
 constexpr Size3 kExpandedIdle{380, 96, 36};
 constexpr Size3 kAlert{300, 40, 20};

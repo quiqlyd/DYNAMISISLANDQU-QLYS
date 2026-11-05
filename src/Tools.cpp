@@ -28,11 +28,13 @@ const ToolInfo kToolInfo[] = {
     {nullptr, L"Yazı al"},       {kGlyphCamera, L"Ekran"},  {kGlyphColor, L"Renk"},
     {kGlyphCafe, L"Kahve"},      {kGlyphNote, L"Not"},      {kGlyphPen, L"Çiz"},
     {kGlyphSettings, L"Ayarlar"}, {kGlyphTimer, L"Odak"},   {kGlyphCalc, L"Hesap"},
-    {kGlyphVolume, L"Sesler"},   {kGlyphSync, L"Güncelle"},
+    {kGlyphVolume, L"Sesler"},   {kGlyphSync, L"Güncelle"}, {kGlyphMoon, L"Uyku"},
 };
 static_assert(sizeof(kToolInfo) / sizeof(kToolInfo[0]) == static_cast<size_t>(Island::kToolCount));
 
 constexpr int kPages = (Island::kToolCount + kToolCols - 1) / kToolCols;
+// Son sayfa favori sitelerdir.
+constexpr int kFavPage = kPages, kAllPages = kPages + 1;
 constexpr float kRowW = kToolCols * kTile + (kToolCols - 1) * kTileGap;
 constexpr size_t kNoteMax = 600;
 
@@ -56,7 +58,7 @@ float QTrackX1(float w) { return w - 66.f; }
 // ---------------------------------------------------------------------------
 
 float Island::ToolsTop() const {
-    return view_ == View::ExpandedMedia ? kExpandedMedia.h : kExpandedIdle.h;
+    return view_ == View::ExpandedMedia ? MediaCardH() : kExpandedIdle.h;
 }
 
 float Island::ToolsX0(float w) const { return (w - kRowW) / 2.f; }
@@ -69,10 +71,15 @@ int Island::ToolHit(float x, float y) const {
         if (rel < 0) return -1;
         int col = static_cast<int>(rel / (kTile + kTileGap));
         if (col >= kToolCols || rel - col * (kTile + kTileGap) > kTile) return -1;
+        if (toolPage_ == kFavPage) {
+            int n = static_cast<int>(favs_.size());
+            if (col < n) return kFavHit + col;
+            return col == n && col < kFavMax ? kFavHit + kFavMax : -1;
+        }
         int t = toolPage_ * kToolCols + col;
         return t < kToolCount ? t : -1;
     }
-    if (y > y0 + kTile && y <= top + kToolsH && std::fabs(x - w / 2) < 26.f) return x < w / 2 ? -10 : -11;
+    if (y > y0 + kTile && y <= top + kToolsH && std::fabs(x - w / 2) < 40.f) return x < w / 2 ? -10 : -11;
     return -1;
 }
 
@@ -83,12 +90,13 @@ bool Island::ToolActive(Tool t) const {
     case Tool::Sounds: return Sounds::Enabled();
     case Tool::Focus:
         return companion_.Kind() == Companion::TimerKind::Focus || companion_.Kind() == Companion::TimerKind::Break;
+    case Tool::Sleep: return sleepEnd_ > 0;
     default: return false;
     }
 }
 
 void Island::DrawTools(View v, float w) {
-    float top = v == View::ExpandedMedia ? kExpandedMedia.h : kExpandedIdle.h;
+    float top = v == View::ExpandedMedia ? MediaCardH() : kExpandedIdle.h;
     float y0 = top + 4.f, x0 = ToolsX0(w);
     brush_->SetColor(Rgba(1, 1, 1, 0.08f));
     rt_->FillRectangle(D2D1::RectF(18, top - 2, w - 18, top - 1), brush_.Get());
@@ -96,9 +104,13 @@ void Island::DrawTools(View v, float w) {
     // Sayfalar yan yana durur; sayfa değişince yayla kayarak gelir.
     float page = drawingOld_ ? static_cast<float>(toolPage_) : pageX_.value;
     rt_->PushAxisAlignedClip(D2D1::RectF(8, top, w - 8, y0 + kTile + 2), D2D1_ANTIALIAS_MODE_ALIASED);
-    for (int p = 0; p < kPages; ++p) {
+    for (int p = 0; p < kAllPages; ++p) {
         float off = (p - page) * (kRowW + 40.f);
         if (std::fabs(off) >= w) continue;
+        if (p == kFavPage) {
+            DrawFavorites(x0, y0, off);
+            continue;
+        }
         for (int i = 0; i < kToolCols; ++i) {
             int t = p * kToolCols + i;
             if (t >= kToolCount) break;
@@ -121,7 +133,14 @@ void Island::DrawTools(View v, float w) {
                 if (static_cast<Tool>(t) == Tool::Sounds && !Sounds::Enabled()) g = kGlyphMute;
                 Text(g, fIcon_.Get(), D2D1::RectF(x, y0 + 5, x + kTile, y0 + 31), ic);
             }
-            Text(info.label, fSmallCenter_.Get(), D2D1::RectF(x + 2, y0 + 31, x + kTile - 2, y0 + 46),
+            const wchar_t* label = info.label;
+            wchar_t sleepLabel[24];
+            if (static_cast<Tool>(t) == Tool::Sleep && sleepEnd_ > 0) {
+                int mins = static_cast<int>(std::ceil(std::max(0.0, sleepEnd_ - Now()) / 60.0));
+                swprintf_s(sleepLabel, L"Uyku %d", mins);
+                label = sleepLabel;
+            }
+            Text(label, fSmallCenter_.Get(), D2D1::RectF(x + 2, y0 + 31, x + kTile - 2, y0 + 46),
                  active ? kWhite : kGray);
             if (static_cast<Tool>(t) == Tool::Note && !note_.empty()) {
                 brush_->SetColor(kOrange);  // kayıtlı not var
@@ -135,10 +154,10 @@ void Island::DrawTools(View v, float w) {
 
     // Sayfa noktaları: etkin olan uzar.
     float cy = y0 + kTile + 11.f;
-    for (int p = 0; p < kPages; ++p) {
+    for (int p = 0; p < kAllPages; ++p) {
         float a = 1.f - std::min(1.f, std::fabs(page - p));
         float dw = 6.f + 8.f * a;
-        float cx = w / 2 + (p - (kPages - 1) / 2.f) * 16.f;
+        float cx = w / 2 + (p - (kAllPages - 1) / 2.f) * 16.f;
         brush_->SetColor(Rgba(1, 1, 1, 0.25f + 0.6f * a));
         rt_->FillRoundedRectangle(D2D1_ROUNDED_RECT{D2D1::RectF(cx - dw / 2, cy - 3, cx + dw / 2, cy + 3), 3, 3},
                                   brush_.Get());
@@ -146,7 +165,7 @@ void Island::DrawTools(View v, float w) {
 }
 
 void Island::SetToolPage(int page) {
-    page = std::clamp(page, 0, kPages - 1);
+    page = std::clamp(page, 0, kAllPages - 1);
     if (page == toolPage_) {
         pageX_.velocity += (page == 0 ? 2.f : -2.f);  // kenarda: hafif esneyip geri gelir
     } else {
@@ -156,6 +175,7 @@ void Island::SetToolPage(int page) {
     pageX_.target = static_cast<float>(toolPage_);
     hoverTool_ = -1;
     for (auto& g : toolGlow_) g.target = 0.f;
+    for (auto& g : favGlow_) g.target = 0.f;
     StartAnimation();
 }
 
@@ -180,6 +200,7 @@ void Island::RunTool(Tool t) {
     case Tool::Calc: OpenCommand(); break;
     case Tool::Sounds: ToggleSounds(); break;
     case Tool::Update: StartUpdate(); break;
+    case Tool::Sleep: CycleSleep(); break;
     case Tool::Count: break;
     }
     StartAnimation();
@@ -946,6 +967,7 @@ constexpr float kMPad = 18.f, kMProgY = 18.f + 64.f + 14.f, kMCtrlY = kMProgY + 
 int Island::MediaHit(float x, float y) const {
     if (view_ != View::ExpandedMedia) return -1;
     float w = viewW_;
+    y -= LyricsH();  // söz alanı varsa kontroller aşağı kayar
     if (snapshot_.durationSec > 0 && std::fabs(y - (kMProgY + 2.f)) <= 8.f && x >= kMPad - 6.f && x <= w - kMPad + 6.f)
         return 20;
     if (std::fabs(y - kMCtrlY) <= 12.f && x >= w - 108.f && x <= w - kMPad + 6.f) return 21;
