@@ -3,10 +3,13 @@
 #include "Updater.h"
 
 #include <objbase.h>
+#include <dwmapi.h>
+#include <psapi.h>
 #include <shellapi.h>
 #include <windowsx.h>
 #include <shellscalingapi.h>
 #include <shlobj.h>
+#include <thread>
 #include <shlguid.h>
 #include <algorithm>
 #include <memory>
@@ -21,7 +24,6 @@ using Microsoft::WRL::ComPtr;
 
 namespace {
 
-constexpr UINT_PTR kTimerAnim = 1;
 constexpr UINT_PTR kTimerTick = 2;
 constexpr UINT_PTR kTimerHover = 3;
 constexpr UINT_PTR kTimerCollapse = 4;
@@ -35,6 +37,7 @@ constexpr int kHotkeyShot = 3;
 constexpr int kHotkeyPicker = 4;
 
 constexpr UINT kTrayMsg = WM_APP + 2;
+constexpr UINT kFrameMsg = WM_APP + 8;  // kare saati: bir sonraki kareyi çiz
 constexpr UINT kTrayId = 1;
 constexpr UINT kCmdAutostart = 100;
 constexpr UINT kCmdExit = 101;
@@ -51,6 +54,15 @@ constexpr UINT kCmdVolumeOsd = 111;
 constexpr wchar_t kSettingsKey[] = L"Software\\DynamisIsland";
 
 constexpr float kTopMargin = 4.f;
+// Gölge için hapın çevresinde bırakılan boşluk (yanlar ve alt).
+constexpr float kPad = 16.f, kPadBottom = 20.f;
+constexpr float kTransition = 0.38f;  // görünüm geçişi süresi (sn)
+
+float EaseOut(float t) {
+    t = std::clamp(t, 0.f, 1.f);
+    float u = 1 - t;
+    return 1 - u * u * u;
+}
 constexpr float kMaxW = 420.f, kMaxH = 230.f;
 
 // Görünüm boyutları (DIP)
@@ -279,6 +291,26 @@ bool Island::Create(HINSTANCE instance) {
     UpdateDpi(GetDpiForWindow(hwnd_));
 
     width_.Snap(kIdle.w);
+    // Biraz daha sönümlü yaylar: hedefe tek, yumuşak bir esnemeyle oturur.
+    width_.stiffness = 240.f;
+    width_.damping = 25.f;
+    height_.stiffness = 300.f;
+    height_.damping = 27.f;
+    radius_.stiffness = 300.f;
+    radius_.damping = 30.f;
+    for (int i = 0; i < 3; ++i) {
+        btnScale_[i].Snap(1.f);
+        btnScale_[i].stiffness = 520.f;
+        btnScale_[i].damping = 20.f;
+        btnGlow_[i].stiffness = 260.f;
+        btnGlow_[i].damping = 32.f;
+    }
+    selY_.stiffness = 420.f;
+    selY_.damping = 38.f;
+    volBar_.stiffness = 260.f;
+    volBar_.damping = 30.f;
+    frameEvent_ = CreateEventW(nullptr, FALSE, FALSE, nullptr);
+    std::thread([this] { FrameLoop(); }).detach();
     shake_.stiffness = 700.f;
     shake_.damping = 9.f;
     lastActivity_ = Now();
@@ -358,8 +390,8 @@ void Island::UpdateMonitor() {
 void Island::UpdateDpi(UINT dpi) {
     if (!dpi) dpi = 96;
     float newScale = dpi / 96.f;
-    int needW = static_cast<int>(std::ceil(kMaxW * newScale)) + 2;
-    int needH = static_cast<int>(std::ceil(kMaxH * newScale)) + 2;
+    int needW = static_cast<int>(std::ceil((kMaxW + 2 * kPad) * newScale)) + 2;
+    int needH = static_cast<int>(std::ceil((kMaxH + kPadBottom) * newScale)) + 2;
     if (memDC_ && newScale == scale_ && needW == dibW_ && needH == dibH_) return;
     scale_ = newScale;
 
@@ -427,10 +459,17 @@ void Island::SetTargets(View v) {
 void Island::Update() {
     View v = TargetView();
     if (v != view_) {
+        // Eski içerik sönerken yenisi yerine otursun.
+        prevView_ = view_;
+        prevW_ = viewW_;
+        prevH_ = viewH_;
+        trans_ = 0.f;
         view_ = v;
-        contentAlpha_ = 0.f;
+        if (v == View::Command) selY_.Snap(kCommandBar + 4.f + clipSel_ * kCommandRow);
     }
     SetTargets(v);
+    viewW_ = width_.target;
+    viewH_ = height_.target;
     // Küçük hâlde tıklamalar alttaki pencereye (ör. tarayıcı sekmeleri) geçer.
     // İndirme kartı ise tıklanır ve sürüklenir.
     bool interactive = v == View::ExpandedMedia || v == View::ExpandedIdle || IsFileCard() ||
@@ -446,16 +485,44 @@ void Island::Update() {
 
 bool Island::NeedsContinuousFrames() const {
     bool mediaVisible = view_ == View::Media || view_ == View::ExpandedMedia;
-    return mediaVisible && snapshot_.playing;
+    // Açık adada Guti hafifçe nefes alır (30 kare/sn yeter).
+    return (mediaVisible && snapshot_.playing) || view_ == View::ExpandedIdle;
 }
 
 void Island::StartAnimation() {
     if (hidden_) return;
     if (!animating_) QueryPerformanceCounter(&lastTick_);
     animating_ = true;
-    if (animInterval_ != 16) {
-        animInterval_ = 16;
-        SetTimer(hwnd_, kTimerAnim, animInterval_, nullptr);
+    frameDivider_ = 1;
+    if (!wantFrames_.exchange(true)) SetEvent(frameEvent_);
+}
+
+void Island::FrameLoop() {
+    // Ekranın dikey tazelemesini bekleyip kare ister: sabit sayaçtan doğan mikro takılmalar olmaz.
+    ComPtr<IDXGIFactory1> factory;
+    ComPtr<IDXGIAdapter1> adapter;
+    ComPtr<IDXGIOutput> output;
+    if (SUCCEEDED(CreateDXGIFactory1(IID_PPV_ARGS(&factory))) && SUCCEEDED(factory->EnumAdapters1(0, &adapter)))
+        adapter->EnumOutputs(0, &output);
+    LARGE_INTEGER freq, last, now;
+    QueryPerformanceFrequency(&freq);
+    QueryPerformanceCounter(&last);
+    for (;;) {
+        WaitForSingleObject(frameEvent_, INFINITE);
+        int n = 0;
+        while (wantFrames_.load()) {
+            bool waited = output && SUCCEEDED(output->WaitForVBlank());
+            QueryPerformanceCounter(&now);
+            double ms = (now.QuadPart - last.QuadPart) * 1000.0 / freq.QuadPart;
+            if (!waited || ms < 4) {
+                // Dikey tazeleme beklenemedi: ~60 Hz'e kendimiz uyalım.
+                if (ms < 16) Sleep(static_cast<DWORD>(16 - ms));
+                QueryPerformanceCounter(&now);
+            }
+            last = now;
+            if (++n % std::max(1, frameDivider_.load()) != 0) continue;
+            if (!framePending_.exchange(true)) PostMessageW(hwnd_, kFrameMsg, 0, 0);
+        }
     }
 }
 
@@ -494,29 +561,30 @@ void Island::OnAnimationTick() {
         moving |= height_.Step(step);
         moving |= radius_.Step(step);
         moving |= shake_.Step(step);
+        for (int i = 0; i < 3; ++i) {
+            moving |= btnScale_[i].Step(step);
+            moving |= btnGlow_[i].Step(step);
+        }
+        moving |= selY_.Step(step);
+        moving |= volBar_.Step(step);
     }
+    if (trans_ < 1.f) {
+        trans_ = std::min(1.f, trans_ + dt / kTransition);
+        moving = true;
+    }
+    if (Now() < rollUntil_) moving = true;
     {
         double now = Now();
         for (float left = dt; left > 0; left -= 1.f / 240.f)
             moving |= eyes_.Step(now, std::min(left, 1.f / 240.f));
     }
-    if (contentAlpha_ < 1.f) {
-        // İçerik, şekil hedefe yaklaşınca belirir.
-        float progress = 1.f - std::min(1.f, std::fabs(width_.target - width_.value) / 60.f);
-        contentAlpha_ = std::min(1.f, std::max(contentAlpha_ + dt * 4.f, progress * 0.6f));
-        moving = true;
-    }
-
     Render();
 
-    UINT want = moving ? 16 : (NeedsContinuousFrames() ? 40 : 0);
-    if (want == 0) {
-        KillTimer(hwnd_, kTimerAnim);
+    if (!moving && !NeedsContinuousFrames()) {
         animating_ = false;
-        animInterval_ = 0;
-    } else if (want != animInterval_) {
-        animInterval_ = want;
-        SetTimer(hwnd_, kTimerAnim, animInterval_, nullptr);
+        wantFrames_ = false;  // boşta: kare saati uyur, işlemci sıfır
+    } else {
+        frameDivider_ = moving ? 1 : 2;  // sadece müzik/nefes: 30 kare/sn
     }
 }
 
@@ -709,12 +777,24 @@ bool Island::EnsureResources() {
                                               D2D1_CAP_STYLE_ROUND, D2D1_LINE_JOIN_ROUND);
         d2d_->CreateStrokeStyle(&sp, nullptr, 0, &roundStroke_);
     }
+    if (!tabular_ && SUCCEEDED(dwrite_->CreateTypography(&tabular_))) {
+        // Eşit genişlikte rakamlar: sayılar değişirken yazı titremesin.
+        tabular_->AddFontFeature(DWRITE_FONT_FEATURE{DWRITE_FONT_FEATURE_TAG_TABULAR_FIGURES, 1});
+    }
     if (!rt_) {
-        auto props = D2D1::RenderTargetProperties(
-            D2D1_RENDER_TARGET_TYPE_SOFTWARE,  // D3D aygıtı açmaz: onlarca MB RAM tasarrufu
-            D2D1::PixelFormat(DXGI_FORMAT_B8G8R8A8_UNORM, D2D1_ALPHA_MODE_PREMULTIPLIED),
-            96.f * scale_, 96.f * scale_);
-        if (FAILED(d2d_->CreateDCRenderTarget(&props, &rt_))) return false;
+        if (!gpuFailed_ && CreateGpu()) {
+            gpu_ = true;
+            rt_ = ctx_;
+        } else {
+            gpuFailed_ = true;
+            gpu_ = false;
+            auto props = D2D1::RenderTargetProperties(
+                D2D1_RENDER_TARGET_TYPE_SOFTWARE,
+                D2D1::PixelFormat(DXGI_FORMAT_B8G8R8A8_UNORM, D2D1_ALPHA_MODE_PREMULTIPLIED),
+                96.f * scale_, 96.f * scale_);
+            if (FAILED(d2d_->CreateDCRenderTarget(&props, &dcRt_))) return false;
+            rt_ = dcRt_;
+        }
         // Saydam zeminde ClearType renkli saçak yapar; gri tonlama temiz görünür.
         rt_->SetTextAntialiasMode(D2D1_TEXT_ANTIALIAS_MODE_GRAYSCALE);
         rt_->CreateSolidColorBrush(kWhite, &brush_);
@@ -726,7 +806,57 @@ bool Island::EnsureResources() {
     return true;
 }
 
+bool Island::CreateGpu() {
+    // Ekran kartında çiz, sonucu katmanlı pencereye GDI uyumlu bir dokudan aktar.
+    D3D_FEATURE_LEVEL levels[] = {D3D_FEATURE_LEVEL_11_1, D3D_FEATURE_LEVEL_11_0, D3D_FEATURE_LEVEL_10_1,
+                                  D3D_FEATURE_LEVEL_10_0};
+    if (FAILED(D3D11CreateDevice(nullptr, D3D_DRIVER_TYPE_HARDWARE, nullptr, D3D11_CREATE_DEVICE_BGRA_SUPPORT,
+                                 levels, ARRAYSIZE(levels), D3D11_SDK_VERSION, &d3d_, nullptr, nullptr)))
+        return false;
+    ComPtr<ID2D1Factory1> f1;
+    ComPtr<IDXGIDevice> dxgi;
+    ComPtr<ID2D1Device> dev;
+    if (FAILED(d2d_.As(&f1)) || FAILED(d3d_.As(&dxgi)) || FAILED(f1->CreateDevice(dxgi.Get(), &dev)) ||
+        FAILED(dev->CreateDeviceContext(D2D1_DEVICE_CONTEXT_OPTIONS_NONE, &ctx_))) {
+        d3d_.Reset();
+        return false;
+    }
+    D3D11_TEXTURE2D_DESC td{};
+    td.Width = static_cast<UINT>(dibW_);
+    td.Height = static_cast<UINT>(dibH_);
+    td.MipLevels = 1;
+    td.ArraySize = 1;
+    td.Format = DXGI_FORMAT_B8G8R8A8_UNORM;
+    td.SampleDesc.Count = 1;
+    td.Usage = D3D11_USAGE_DEFAULT;
+    td.BindFlags = D3D11_BIND_RENDER_TARGET | D3D11_BIND_SHADER_RESOURCE;
+    td.MiscFlags = D3D11_RESOURCE_MISC_GDI_COMPATIBLE;
+    ComPtr<ID3D11Texture2D> tex;
+    if (FAILED(d3d_->CreateTexture2D(&td, nullptr, &tex)) || FAILED(tex.As(&surface_))) {
+        ctx_.Reset();
+        d3d_.Reset();
+        return false;
+    }
+    auto bp = D2D1::BitmapProperties1(
+        D2D1_BITMAP_OPTIONS_TARGET | D2D1_BITMAP_OPTIONS_GDI_COMPATIBLE,
+        D2D1::PixelFormat(DXGI_FORMAT_B8G8R8A8_UNORM, D2D1_ALPHA_MODE_PREMULTIPLIED), 96.f * scale_, 96.f * scale_);
+    if (FAILED(ctx_->CreateBitmapFromDxgiSurface(surface_.Get(), &bp, &target_))) {
+        surface_.Reset();
+        ctx_.Reset();
+        d3d_.Reset();
+        return false;
+    }
+    ctx_->SetTarget(target_.Get());
+    ctx_->SetDpi(96.f * scale_, 96.f * scale_);
+    return true;
+}
+
 void Island::DiscardDeviceResources() {
+    ctx_.Reset();
+    target_.Reset();
+    surface_.Reset();
+    d3d_.Reset();
+    dcRt_.Reset();
     brush_.Reset();
     shotBitmap_.Reset();
     for (auto& it : shelf_) it.icon.Reset();
@@ -739,15 +869,23 @@ void Island::Render() {
 
     float w = std::clamp(width_.value, 20.f, kMaxW);
     float h = std::clamp(height_.value, 20.f, kMaxH);
+    // Hafif lastik etkisi: boy hızla uzarken en biraz daralır (ve tersi).
+    w = std::clamp(w - std::clamp(height_.velocity * 0.006f, -4.f, 4.f), 20.f, kMaxW);
     float r = std::clamp(radius_.value, 0.f, std::min(w, h) / 2.f);
-    int pxW = std::min(dibW_, static_cast<int>(std::ceil(w * scale_)));
-    int pxH = std::min(dibH_, static_cast<int>(std::ceil(h * scale_)));
+    int pxW = std::min(dibW_, static_cast<int>(std::ceil((w + 2 * kPad) * scale_)));
+    int pxH = std::min(dibH_, static_cast<int>(std::ceil((h + kPadBottom) * scale_)));
 
-    RECT bind{0, 0, pxW, pxH};
-    if (FAILED(rt_->BindDC(memDC_, &bind))) return;
+    if (!gpu_) {
+        RECT bind{0, 0, pxW, pxH};
+        if (FAILED(dcRt_->BindDC(memDC_, &bind))) return;
+    }
     rt_->BeginDraw();
+    rt_->SetTransform(D2D1::Matrix3x2F::Identity());
     rt_->Clear(D2D1::ColorF(0, 0, 0, 0));
+    rt_->SetTransform(D2D1::Matrix3x2F::Translation(kPad, 0));
+    fades_.clear();
 
+    DrawShadow(w, h, r);
     D2D1_ROUNDED_RECT pill{D2D1::RectF(0, 0, w, h), r, r};
     brush_->SetColor(Rgba(0, 0, 0, 1));
     rt_->FillRoundedRectangle(pill, brush_.Get());
@@ -761,12 +899,55 @@ void Island::Render() {
     ComPtr<ID2D1Layer> layer;
     rt_->CreateLayer(&layer);
     if (layer && clip) {
-        rt_->PushLayer(D2D1::LayerParameters(D2D1::InfiniteRect(), clip.Get(),
-                                             D2D1_ANTIALIAS_MODE_PER_PRIMITIVE,
-                                             D2D1::IdentityMatrix(), contentAlpha_),
-                       layer.Get());
+        rt_->PushLayer(D2D1::LayerParameters(D2D1::InfiniteRect(), clip.Get()), layer.Get());
     }
-    switch (view_) {
+
+    // Geçiş: eski içerik hafifçe küçülüp söner, yenisi biraz büyükten yerine oturur.
+    // İçerik son boyutuna göre yerleşir; hap büyürken onu "açığa çıkarır".
+    float e = EaseOut(trans_);
+    if (trans_ < 1.f && prevView_ != view_) {
+        drawingOld_ = true;
+        float a = 1.f - std::min(1.f, trans_ * 2.2f);
+        if (a > 0.01f) {
+            PushFade(a, (w - prevW_) / 2, 0, 1.f - 0.06f * e, prevW_ / 2, prevH_ / 2);
+            DrawView(prevView_, prevW_, prevH_);
+            PopFade();
+        }
+        drawingOld_ = false;
+    }
+    {
+        float a = trans_ >= 1.f ? 1.f : EaseOut((trans_ - 0.12f) / 0.88f);
+        PushFade(a, (w - viewW_) / 2, -3.f * (1 - e), 1.04f - 0.04f * e, viewW_ / 2, viewH_ / 2);
+        DrawView(view_, viewW_, viewH_);
+        PopFade();
+    }
+    if (layer && clip) rt_->PopLayer();
+
+    HRESULT hr = rt_->EndDraw();
+    if (hr == D2DERR_RECREATE_TARGET) {
+        DiscardDeviceResources();
+        return;
+    }
+
+    float cx = (monitor_.left + monitor_.right) / 2.f + shake_.value * scale_;
+    POINT dst{static_cast<LONG>(std::lround(cx - (w / 2 + kPad) * scale_)),
+              monitor_.top + static_cast<LONG>(std::lround(kTopMargin * scale_))};
+    SIZE size{pxW, pxH};
+    POINT src{0, 0};
+    BLENDFUNCTION blend{AC_SRC_OVER, 0, 255, AC_SRC_ALPHA};
+    if (gpu_) {
+        HDC dc = nullptr;
+        if (SUCCEEDED(surface_->GetDC(FALSE, &dc))) {
+            UpdateLayeredWindow(hwnd_, nullptr, &dst, &size, dc, &src, 0, &blend, ULW_ALPHA);
+            surface_->ReleaseDC(nullptr);
+        }
+    } else {
+        UpdateLayeredWindow(hwnd_, nullptr, &dst, &size, memDC_, &src, 0, &blend, ULW_ALPHA);
+    }
+}
+
+void Island::DrawView(View v, float w, float h) {
+    switch (v) {
     case View::Idle: DrawIdle(w, h); break;
     case View::Media: DrawCompactMedia(w, h); break;
     case View::ExpandedMedia: DrawExpandedMedia(w, h); break;
@@ -777,8 +958,8 @@ void Island::Render() {
     case View::Drop: DrawDrop(w, h); break;
     case View::Picker: DrawPicker(w, h); break;
     }
-    if ((view_ == View::ExpandedIdle || view_ == View::ExpandedMedia) && ShelfVisible()) DrawShelf(w);
-    if (view_ == View::Idle && !shelf_.empty()) {
+    if ((v == View::ExpandedIdle || v == View::ExpandedMedia) && ShelfVisible()) DrawShelf(w);
+    if (v == View::Idle && !shelf_.empty()) {
         // Rafta dosya var: solda minik kâğıt yığını
         brush_->SetColor(Rgba(1, 1, 1, 0.5f));
         D2D1_ROUNDED_RECT a{D2D1::RectF(7, h / 2 - 4, 13, h / 2 + 3), 1.2f, 1.2f};
@@ -787,32 +968,120 @@ void Island::Render() {
         rt_->FillRoundedRectangle(b, brush_.Get());
     }
     // Kamera / mikrofon açıkken küçük renkli nokta (yeşil kamera, turuncu mikrofon).
-    switch (view_) {
+    switch (v) {
     case View::Idle: DrawPrivacyDots(w - 9.f, h / 2); break;
     case View::Media: DrawPrivacyDots(w - 44.f, h / 2); break;
     case View::Timer: DrawPrivacyDots(w - 6.5f, 6.5f); break;
     case View::ExpandedIdle:
     case View::ExpandedMedia: DrawPrivacyDots(w / 2 + 6.f, 9.f); break;
-    case View::Alert:
-    case View::Command:
-    case View::Drop:
-    case View::Picker: break;
+    default: break;
     }
-    if (layer && clip) rt_->PopLayer();
+}
 
-    HRESULT hr = rt_->EndDraw();
-    if (hr == D2DERR_RECREATE_TARGET) {
-        DiscardDeviceResources();
+void Island::DrawShadow(float w, float h, float r) {
+    // Yumuşak gölge: üst üste binen, giderek büyüyen ve silikleşen hap şekilleri.
+    // Açık duvar kâğıtlarında adayı zeminden ayırır; koyu zeminde neredeyse görünmez.
+    float strength = std::clamp((h - 18.f) / 90.f, 0.35f, 1.f);
+    constexpr int kSteps = 9;
+    for (int i = kSteps; i >= 1; --i) {
+        float d = i * 1.7f;
+        float a = 0.028f * strength * (1.f - static_cast<float>(i) / (kSteps + 1));
+        brush_->SetColor(Rgba(0, 0, 0, a));
+        D2D1_ROUNDED_RECT rr{D2D1::RectF(-d, -d + 4.f, w + d, h + d + 4.f), r + d, r + d};
+        rt_->FillRoundedRectangle(rr, brush_.Get());
+    }
+}
+
+float Island::Stagger(int i) const {
+    // Öğeler sırayla gelir: her biri bir öncekinden 45 ms sonra.
+    if (drawingOld_ || trans_ >= 1.f) return 1.f;
+    float t = trans_ * kTransition - 0.04f - i * 0.045f;
+    return EaseOut(t / 0.22f);
+}
+
+void Island::PushFade(float alpha, float dx, float dy, float scale, float cx, float cy) {
+    D2D1_MATRIX_3X2_F old;
+    rt_->GetTransform(&old);
+    D2D1_MATRIX_3X2_F m = D2D1::Matrix3x2F::Scale(scale, scale, D2D1::Point2F(cx, cy)) *
+                          D2D1::Matrix3x2F::Translation(dx, dy) * *D2D1::Matrix3x2F::ReinterpretBaseType(&old);
+    rt_->SetTransform(m);
+    bool useLayer = alpha < 0.999f;
+    if (useLayer) {
+        ComPtr<ID2D1Layer> layer;
+        rt_->CreateLayer(&layer);
+        if (layer) {
+            rt_->PushLayer(D2D1::LayerParameters(D2D1::InfiniteRect(), nullptr, D2D1_ANTIALIAS_MODE_PER_PRIMITIVE,
+                                                 D2D1::IdentityMatrix(), std::max(0.f, alpha)),
+                           layer.Get());
+        } else {
+            useLayer = false;
+        }
+    }
+    fades_.push_back({old, useLayer});
+}
+
+void Island::PopFade() {
+    if (fades_.empty()) return;
+    Fade f = fades_.back();
+    fades_.pop_back();
+    if (f.layer) rt_->PopLayer();
+    rt_->SetTransform(f.old);
+}
+
+void Island::DrawRolling(Roll& roll, const std::wstring& text, IDWriteTextFormat* format, D2D1_RECT_F rect,
+                         D2D1_COLOR_F color) {
+    if (!format) return;
+    double now = Now();
+    if (!drawingOld_ && text != roll.cur) {
+        if (!roll.cur.empty()) {
+            roll.prev = roll.cur;
+            roll.at = now;
+            rollUntil_ = std::max(rollUntil_, now + 0.32);
+            StartAnimation();
+        }
+        roll.cur = text;
+    }
+    const std::wstring& cur = drawingOld_ ? roll.cur : text;
+    float rw = rect.right - rect.left, rh = rect.bottom - rect.top;
+    ComPtr<IDWriteTextLayout> full;
+    dwrite_->CreateTextLayout(cur.c_str(), static_cast<UINT32>(cur.size()), format, rw, rh, &full);
+    if (!full) return;
+    DWRITE_TEXT_RANGE all{0, static_cast<UINT32>(cur.size())};
+    if (tabular_) full->SetTypography(tabular_.Get(), all);
+    float t = static_cast<float>((now - roll.at) / 0.32);
+    bool rolling = t < 1.f && roll.prev.size() == cur.size() && roll.prev != cur;
+    brush_->SetColor(color);
+    if (!rolling) {
+        rt_->DrawTextLayout(D2D1::Point2F(rect.left, rect.top), full.Get(), brush_.Get(),
+                            D2D1_DRAW_TEXT_OPTIONS_CLIP);
         return;
     }
-
-    POINT dst{(monitor_.left + monitor_.right) / 2 - pxW / 2 +
-                  static_cast<int>(std::lround(shake_.value * scale_)),
-              monitor_.top + static_cast<int>(std::lround(kTopMargin * scale_))};
-    SIZE size{pxW, pxH};
-    POINT src{0, 0};
-    BLENDFUNCTION blend{AC_SRC_OVER, 0, 255, AC_SRC_ALPHA};
-    UpdateLayeredWindow(hwnd_, nullptr, &dst, &size, memDC_, &src, 0, &blend, ULW_ALPHA);
+    // Kilometre sayacı: değişen her rakam yukarı kayıp gider, yenisi aşağıdan gelir.
+    float e = EaseOut(t);
+    rt_->PushAxisAlignedClip(rect, D2D1_ANTIALIAS_MODE_ALIASED);
+    for (UINT32 i = 0; i < cur.size(); ++i) {
+        FLOAT px = 0, py = 0;
+        DWRITE_HIT_TEST_METRICS hm{};
+        full->HitTestTextPosition(i, FALSE, &px, &py, &hm);
+        auto drawChar = [&](wchar_t c, float dy, float alpha) {
+            ComPtr<IDWriteTextLayout> one;
+            dwrite_->CreateTextLayout(&c, 1, format, 200.f, hm.height, &one);
+            if (!one) return;
+            one->SetTextAlignment(DWRITE_TEXT_ALIGNMENT_LEADING);
+            one->SetParagraphAlignment(DWRITE_PARAGRAPH_ALIGNMENT_NEAR);
+            if (tabular_) one->SetTypography(tabular_.Get(), DWRITE_TEXT_RANGE{0, 1});
+            brush_->SetColor(WithAlpha(color, alpha));
+            rt_->DrawTextLayout(D2D1::Point2F(rect.left + hm.left, rect.top + hm.top + dy), one.Get(), brush_.Get());
+        };
+        if (cur[i] == roll.prev[i]) {
+            drawChar(cur[i], 0, 1);
+        } else {
+            float travel = hm.height * 0.75f;
+            drawChar(roll.prev[i], -travel * e, 1 - e);
+            drawChar(cur[i], travel * (1 - e), e);
+        }
+    }
+    rt_->PopAxisAlignedClip();
 }
 
 void Island::Text(const wchar_t* text, IDWriteTextFormat* format, D2D1_RECT_F rect,
@@ -890,16 +1159,25 @@ void Island::DrawCompactMedia(float w, float h) {
 }
 
 void Island::DrawExpandedMedia(float w, float h) {
+    (void)h;
     const float pad = 18.f, art = 64.f;
+    float s0 = Stagger(0);
+    PushFade(s0, 0, 0, 0.9f + 0.1f * s0, pad + art / 2, pad + art / 2);  // kapak hafifçe büyüyerek gelir
     DrawArt(D2D1::RectF(pad, pad, pad + art, pad + art), 14.f);
+    PopFade();
 
     float tx = pad + art + 14.f, tr = w - pad - 30.f;
+    float s1 = Stagger(1);
+    PushFade(s1, 8.f * (1 - s1), 0);
     const wchar_t* title = snapshot_.title.empty() ? L"Bilinmeyen parça" : snapshot_.title.c_str();
     Text(title, fTitle_.Get(), D2D1::RectF(tx, pad + 6, tr, pad + 30), kWhite);
     Text(snapshot_.artist.c_str(), fArtist_.Get(), D2D1::RectF(tx, pad + 32, tr, pad + 54), kGray);
     DrawBars(w - pad, pad + 18, 16.f, 3.f);
+    PopFade();
 
     // İlerleme çubuğu
+    float s2 = Stagger(2);
+    PushFade(s2, 0, 5.f * (1 - s2));
     float py = pad + art + 14.f;
     double dur = snapshot_.durationSec, pos = snapshot_.CurrentPosition();
     D2D1_ROUNDED_RECT track{D2D1::RectF(pad, py, w - pad, py + 4), 2, 2};
@@ -915,12 +1193,63 @@ void Island::DrawExpandedMedia(float w, float h) {
                  D2D1::RectF(w / 2, py + 6, w - pad, py + 20), kGray);
     }
 
-    // Kontroller
+    PopFade();
+
+    // Kontroller: üstüne gelince yumuşak bir hale, basınca minik bir çökme.
+    float s3 = Stagger(3);
+    PushFade(s3, 0, 6.f * (1 - s3));
     float cy = py + 42.f, cx = w / 2;
-    Text(kGlyphPrev, fIcon_.Get(), D2D1::RectF(cx - 86, cy - 20, cx - 46, cy + 20), kWhite);
-    Text(snapshot_.playing ? kGlyphPause : kGlyphPlay, fIconBig_.Get(),
-             D2D1::RectF(cx - 22, cy - 22, cx + 22, cy + 22), kWhite);
-    Text(kGlyphNext, fIcon_.Get(), D2D1::RectF(cx + 46, cy - 20, cx + 86, cy + 20), kWhite);
+    const float offs[3] = {-66.f, 0.f, 66.f};
+    for (int i = 0; i < 3; ++i) {
+        float bx = cx + offs[i];
+        float glow = std::clamp(btnGlow_[i].value, 0.f, 1.f);
+        if (glow > 0.01f) {
+            brush_->SetColor(Rgba(1, 1, 1, 0.13f * glow));
+            float rr = (i == 1 ? 24.f : 20.f) * (0.85f + 0.15f * glow);
+            rt_->FillEllipse(D2D1::Ellipse(D2D1::Point2F(bx, cy), rr, rr), brush_.Get());
+        }
+        PushFade(1.f, 0, 0, btnScale_[i].value, bx, cy);
+        if (i == 1)
+            Text(snapshot_.playing ? kGlyphPause : kGlyphPlay, fIconBig_.Get(),
+                 D2D1::RectF(bx - 22, cy - 22, bx + 22, cy + 22), kWhite);
+        else
+            Text(i == 0 ? kGlyphPrev : kGlyphNext, fIcon_.Get(), D2D1::RectF(bx - 20, cy - 20, bx + 20, cy + 20),
+                 kWhite);
+        PopFade();
+    }
+    PopFade();
+}
+
+int Island::ButtonAt(float x, float y) const {
+    if (view_ != View::ExpandedMedia) return -1;
+    const float pad = 18.f, art = 64.f;
+    float cy = pad + art + 14.f + 42.f, cx = viewW_ / 2;
+    if (std::fabs(y - cy) >= 24) return -1;
+    if (std::fabs(x - (cx - 66)) < 24) return 0;
+    if (std::fabs(x - cx) < 26) return 1;
+    if (std::fabs(x - (cx + 66)) < 24) return 2;
+    return -1;
+}
+
+void Island::OnMouseMove(float x, float y) {
+    if (!trackingLeave_) {
+        TRACKMOUSEEVENT tme{sizeof(tme), TME_LEAVE, hwnd_, 0};
+        trackingLeave_ = TrackMouseEvent(&tme) != FALSE;
+    }
+    int b = ButtonAt(x, y);
+    if (b != hoverBtn_) {
+        hoverBtn_ = b;
+        for (int i = 0; i < 3; ++i) btnGlow_[i].target = i == b ? 1.f : 0.f;
+        StartAnimation();
+    }
+    // Pano listesinde fareyle gezinmek seçimi de kaydırır.
+    if (view_ == View::Command && input_.empty() && y > kCommandBar) {
+        int row = static_cast<int>((y - kCommandBar - 4) / kCommandRow);
+        if (row >= 0 && row < VisibleClips() && row != clipSel_) {
+            clipSel_ = row;
+            StartAnimation();
+        }
+    }
 }
 
 void Island::DrawBattery(float x, float y, float w, float h, int percent, bool charging) {
@@ -939,7 +1268,11 @@ void Island::DrawBattery(float x, float y, float w, float h, int percent, bool c
 void Island::DrawExpandedIdle(float w, float h) {
     SYSTEMTIME st;
     GetLocalTime(&st);
-    Text(FormatClock(st).c_str(), fBigClock_.Get(), D2D1::RectF(26, 10, w - 150, 56), kWhite);
+    float s0 = Stagger(0), s1 = Stagger(1), s2 = Stagger(2), s3 = Stagger(3);
+    PushFade(s0, 0, 6.f * (1 - s0));
+    DrawRolling(rollClock_, FormatClock(st), fBigClock_.Get(), D2D1::RectF(26, 10, w - 150, 56), kWhite);
+    PopFade();
+    PushFade(s1, 0, 6.f * (1 - s1));
     if (companion_.Pending() || companion_.TimerActive()) {
         Text(TimerText().c_str(), fDate_.Get(), D2D1::RectF(28, 56, w - 150, 80), TimerColor());
     } else if (!reminders_.empty()) {
@@ -954,8 +1287,15 @@ void Island::DrawExpandedIdle(float w, float h) {
         Text(buf, fDate_.Get(), D2D1::RectF(28, 56, w - 150, 80), kOrange);
     } else
         Text(FormatDate(st).c_str(), fDate_.Get(), D2D1::RectF(28, 56, w - 150, 80), kGray);
+    PopFade();
     h = kExpandedIdle.h;  // raf açıksa alt kısım rafındır
-    eyes_.Draw(rt_.Get(), d2d_.Get(), brush_.Get(), roundStroke_.Get(), w - 128, h / 2, 1.6f, 0.f);
+    // Guti hafifçe nefes alır.
+    float breath = 1.f + 0.018f * static_cast<float>(std::sin(time_ * 1.9));
+    PushFade(s2, 0, 0, 0.85f + 0.15f * s2, w - 128, h / 2);
+    eyes_.Draw(rt_.Get(), d2d_.Get(), brush_.Get(), roundStroke_.Get(), w - 128, h / 2, 1.6f * breath,
+               -0.8f * (breath - 1.f) * 40.f);
+    PopFade();
+    PushFade(s3, 0, 6.f * (1 - s3));
 
     SYSTEM_POWER_STATUS ps{};
     if (GetSystemPowerStatus(&ps) && !(ps.BatteryFlag & 128) && ps.BatteryLifePercent <= 100) {
@@ -967,6 +1307,7 @@ void Island::DrawExpandedIdle(float w, float h) {
         swprintf_s(buf, L"%%%d", pct);  // Türkçe: yüzde işareti önde
         Text(buf, fSmall_.Get(), D2D1::RectF(bx, h / 2 + 4, bx + 40, h / 2 + 20), kGray);
     }
+    PopFade();
 }
 
 std::wstring Island::TimerText() const {
@@ -1011,7 +1352,7 @@ void Island::DrawTimer(float w, float h) {
         swprintf_s(buf, L"%d:%02d", sec / 60, sec % 60);
         t = buf;
     }
-    Text(t.c_str(), fTinyRight_.Get(), D2D1::RectF(44, 0, w - 12, h), TimerColor());
+    DrawRolling(rollTimer_, t, fTinyRight_.Get(), D2D1::RectF(44, 0, w - 12, h), TimerColor());
     if (companion_.TimerActive() && companion_.Total() > 0 && !companion_.Pending()) {
         float frac = static_cast<float>(companion_.Remaining(Now()) / companion_.Total());
         brush_->SetColor(WithAlpha(TimerColor(), 0.8f));
@@ -1474,6 +1815,8 @@ bool Island::SaveClipboardImage() {
 
 void Island::DrawScreenshot(float w, float h) {
     const float boxW = 108.f, boxH = 72.f, x0 = 12.f, y0 = (h - boxH) / 2;
+    float s0 = Stagger(0), s1 = Stagger(2);
+    PushFade(s0, 0, 0, 0.85f + 0.15f * s0, x0 + boxW / 2, h / 2);
     if (!shotBitmap_ && shotThumb_) rt_->CreateBitmapFromWicBitmap(shotThumb_.Get(), nullptr, &shotBitmap_);
     if (shotBitmap_) {
         D2D1_SIZE_F bs = shotBitmap_->GetSize();
@@ -1491,9 +1834,12 @@ void Island::DrawScreenshot(float w, float h) {
         brush_->SetColor(Rgba(1, 1, 1, 0.18f));
         rt_->DrawRoundedRectangle(D2D1_ROUNDED_RECT{r, 8, 8}, brush_.Get(), 1.f);
     }
+    PopFade();
     float tx = x0 + boxW + 14;
+    PushFade(s1, 8.f * (1 - s1), 0);
     Text(L"Ekran görüntüsü", fAlert_.Get(), D2D1::RectF(tx, h / 2 - 22, w - 20, h / 2 + 2), kWhite);
     Text(L"sürükle bırak · tıkla: aç", fSmall_.Get(), D2D1::RectF(tx, h / 2 + 2, w - 20, h / 2 + 20), kGray);
+    PopFade();
 }
 
 void Island::DrawDrop(float w, float h) {
@@ -1573,6 +1919,8 @@ void Island::DrawShelf(float w) {
     int shown = std::min<int>(static_cast<int>(shelf_.size()), kShelfShown);
     for (int i = 0; i < shown; ++i) {
         float cx = 18 + i * kShelfCell + kShelfCell / 2;
+        float st = Stagger(4 + i);
+        PushFade(st, 0, 8.f * (1 - st), 0.8f + 0.2f * st, cx, top + 18);
         if (ID2D1Bitmap* icon = ShelfIcon(static_cast<size_t>(i)))
             rt_->DrawBitmap(icon, D2D1::RectF(cx - 14, top + 4, cx + 14, top + 32));
         const std::wstring& p = shelf_[static_cast<size_t>(i)].path;
@@ -1580,6 +1928,7 @@ void Island::DrawShelf(float w) {
         std::wstring name = slash == std::wstring::npos ? p : p.substr(slash + 1);
         Text(name.c_str(), fSmallCenter_.Get(),
              D2D1::RectF(cx - kShelfCell / 2 + 2, top + 34, cx + kShelfCell / 2 - 2, top + 50), kGray);
+        PopFade();
     }
     if (static_cast<int>(shelf_.size()) > shown) {
         wchar_t more[16];
@@ -1605,6 +1954,8 @@ void Island::OnVolume(int percent, bool muted) {
     if ((muted || percent == 0) && !(wasMuted || before == 0)) eyes_.SetMood(Eyes::Mood::Sleepy, now, 1.4);
     else if (!muted && percent >= 90 && before < 90) eyes_.SetMood(Eyes::Mood::Surprised, now, 0.9);
     else if (!muted && (wasMuted || before == 0)) eyes_.SetMood(Eyes::Mood::Happy, now, 0.8);
+    if (!(alertActive_ && alertKind_ == AlertKind::Volume)) volBar_.Snap(static_cast<float>(before));
+    volBar_.target = static_cast<float>(percent);
     ShowAlert(AlertKind::Volume, percent, 1500);
 }
 
@@ -1617,14 +1968,14 @@ void Island::DrawVolume(float w, float h) {
     brush_->SetColor(Rgba(1, 1, 1, 0.18f));
     rt_->FillRoundedRectangle(track, brush_.Get());
     if (!silent) {
-        float fx = x0 + (x1 - x0) * std::clamp(alertValue_, 0, 100) / 100.f;
+        float fx = x0 + (x1 - x0) * std::clamp(volBar_.value, 0.f, 100.f) / 100.f;
         D2D1_ROUNDED_RECT fill{D2D1::RectF(x0, cy - 3, std::max(x0 + 6, fx), cy + 3), 3, 3};
         brush_->SetColor(kWhite);
         rt_->FillRoundedRectangle(fill, brush_.Get());
     }
     wchar_t buf[16];
     swprintf_s(buf, L"%%%d", silent ? 0 : alertValue_);
-    Text(buf, fAlertRight_.Get(), D2D1::RectF(x1, 0, w - 16, h), silent ? kGray : kWhite);
+    DrawRolling(rollVolume_, buf, fAlertRight_.Get(), D2D1::RectF(x1, 0, w - 16, h), silent ? kGray : kWhite);
 }
 
 void Island::OnBtBattery(int level, const std::wstring& name) {
@@ -1852,7 +2203,7 @@ void Island::OnCommandKey(UINT vk) {
     if (vk == VK_UP) clipSel_ = (clipSel_ + n - 1) % n;
     else if (vk == VK_DOWN) clipSel_ = (clipSel_ + 1) % n;
     else return;
-    if (!animating_) Render();
+    StartAnimation();
 }
 
 void Island::AcceptCommand() {
@@ -2049,17 +2400,22 @@ void Island::DrawCommand(float w, float h) {
     if (!n) return;
     brush_->SetColor(Rgba(1, 1, 1, 0.08f));
     rt_->FillRectangle(D2D1::RectF(18, bar, w - 18, bar + 1), brush_.Get());
+    // Seçim kutusu satırdan satıra süzülür.
+    selY_.target = bar + 4 + clipSel_ * kCommandRow;
+    if (std::fabs(selY_.target - selY_.value) > 0.3f && !drawingOld_) StartAnimation();
+    float sy = std::clamp(selY_.value, bar + 4, bar + 4 + (n - 1) * kCommandRow);
+    brush_->SetColor(Rgba(1, 1, 1, 0.10f));
+    D2D1_ROUNDED_RECT sel{D2D1::RectF(10, sy + 1, w - 10, sy + kCommandRow - 1), 9, 9};
+    rt_->FillRoundedRectangle(sel, brush_.Get());
     for (int i = 0; i < n; ++i) {
         float y = bar + 4 + i * kCommandRow;
-        if (i == clipSel_) {
-            brush_->SetColor(Rgba(1, 1, 1, 0.10f));
-            D2D1_ROUNDED_RECT sel{D2D1::RectF(10, y + 1, w - 10, y + kCommandRow - 1), 9, 9};
-            rt_->FillRoundedRectangle(sel, brush_.Get());
-        }
+        float st = Stagger(1 + i);  // satırlar sırayla kayarak gelir
+        PushFade(st, 0, -8.f * (1 - st));
         std::wstring t = clips_[i].substr(0, 160);
         for (auto& ch : t) if (ch == L'\r' || ch == L'\n' || ch == L'\t') ch = L' ';
         Text(t.c_str(), fArtist_.Get(), D2D1::RectF(20, y, w - 20, y + kCommandRow),
              i == clipSel_ ? kWhite : kGray);
+        PopFade();
     }
 }
 
@@ -2151,6 +2507,24 @@ void Island::OnLookTimer() {
 // Tepsi simgesi
 // ---------------------------------------------------------------------------
 
+void Island::UpdatePerf() {
+    // Kendi işlemci kullanımımız: son saniyelerin yumuşatılmış ortalaması (tüm çekirdeklere göre).
+    FILETIME c, e, k, u, now;
+    if (!GetProcessTimes(GetCurrentProcess(), &c, &e, &k, &u)) return;
+    GetSystemTimeAsFileTime(&now);
+    auto q = [](const FILETIME& f) { return (static_cast<ULONGLONG>(f.dwHighDateTime) << 32) | f.dwLowDateTime; };
+    ULONGLONG proc = q(k) + q(u), wall = q(now);
+    if (lastWallTime_ && wall > lastWallTime_) {
+        SYSTEM_INFO si;
+        GetSystemInfo(&si);
+        float pct = 100.f * static_cast<float>(proc - lastProcTime_) /
+                    static_cast<float>((wall - lastWallTime_) * std::max<DWORD>(1, si.dwNumberOfProcessors));
+        cpuPct_ += (pct - cpuPct_) * 0.2f;
+    }
+    lastProcTime_ = proc;
+    lastWallTime_ = wall;
+}
+
 void Island::AddTrayIcon() {
     NOTIFYICONDATAW nid{sizeof(nid)};
     nid.hWnd = hwnd_;
@@ -2174,6 +2548,15 @@ void Island::ShowTrayMenu() {
         wcscat_s(title, extra);
     }
     AppendMenuW(menu, MF_STRING | MF_GRAYED, 0, title);
+    {
+        PROCESS_MEMORY_COUNTERS_EX pmc{sizeof(pmc)};
+        GetProcessMemoryInfo(GetCurrentProcess(), reinterpret_cast<PROCESS_MEMORY_COUNTERS*>(&pmc), sizeof(pmc));
+        wchar_t perf[128];
+        swprintf_s(perf, L"RAM %.0f MB (özel %.0f MB)  ·  CPU %%%.1f  ·  %s",
+                   pmc.WorkingSetSize / 1048576.0, pmc.PrivateUsage / 1048576.0, cpuPct_,
+                   gpu_ ? L"ekran kartı" : L"yazılım çizimi");
+        AppendMenuW(menu, MF_STRING | MF_GRAYED, 0, perf);
+    }
     AppendMenuW(menu, MF_SEPARATOR, 0, nullptr);
     AppendMenuW(menu, MF_STRING, kCmdToggle,
                 userHidden_ ? L"Adayı göster\tCtrl+Alt+D" : L"Adayı gizle\tCtrl+Alt+D");
@@ -2314,7 +2697,13 @@ LRESULT Island::WndProc(UINT msg, WPARAM wp, LPARAM lp) {
             else OpenCard();
             return 0;
         }
-        if (int hit = ShelfHit(GET_X_LPARAM(lp) / scale_, GET_Y_LPARAM(lp) / scale_); hit != -1) {
+        if (int b = ButtonAt(GET_X_LPARAM(lp) / scale_ - kPad, GET_Y_LPARAM(lp) / scale_); b >= 0) {
+            pressBtn_ = b;
+            btnScale_[b].target = 0.8f;  // basınca hafifçe çöker
+            StartAnimation();
+            return 0;
+        }
+        if (int hit = ShelfHit(GET_X_LPARAM(lp) / scale_ - kPad, GET_Y_LPARAM(lp) / scale_); hit != -1) {
             swallowUpUntil_ = Now() + 1.0;
             if (hit == -2) {
                 shelf_.clear();  // rafı boşalt
@@ -2345,7 +2734,31 @@ LRESULT Island::WndProc(UINT msg, WPARAM wp, LPARAM lp) {
             swallowUpUntil_ = 0;
             return 0;
         }
-        OnClick(GET_X_LPARAM(lp) / scale_, GET_Y_LPARAM(lp) / scale_);
+        if (pressBtn_ >= 0) {
+            btnScale_[pressBtn_].target = 1.f;
+            btnScale_[pressBtn_].velocity += 3.f;  // bırakınca yaylanarak geri gelir
+            pressBtn_ = -1;
+            StartAnimation();
+        }
+        OnClick(GET_X_LPARAM(lp) / scale_ - kPad, GET_Y_LPARAM(lp) / scale_);
+        return 0;
+
+    case WM_MOUSEMOVE:
+        OnMouseMove(GET_X_LPARAM(lp) / scale_ - kPad, GET_Y_LPARAM(lp) / scale_);
+        return 0;
+
+    case WM_MOUSELEAVE:
+        trackingLeave_ = false;
+        hoverBtn_ = -1;
+        for (auto& g : btnGlow_) g.target = 0.f;
+        if (pressBtn_ >= 0) btnScale_[pressBtn_].target = 1.f;
+        pressBtn_ = -1;
+        StartAnimation();
+        return 0;
+
+    case kFrameMsg:
+        framePending_ = false;
+        OnAnimationTick();
         return 0;
 
     case WM_CHAR:
@@ -2386,7 +2799,6 @@ LRESULT Island::WndProc(UINT msg, WPARAM wp, LPARAM lp) {
 
     case WM_TIMER:
         switch (wp) {
-        case kTimerAnim: OnAnimationTick(); break;
         case kTimerLook: OnLookTimer(); break;
         case kTimerUpdateCheck:
             SetTimer(hwnd_, kTimerUpdateCheck, 6 * 3600 * 1000, nullptr);
@@ -2422,6 +2834,7 @@ LRESULT Island::WndProc(UINT msg, WPARAM wp, LPARAM lp) {
             OnCompanionTick();
             OnPrivacyTick();
             CheckReminders();
+            UpdatePerf();
             if (++healthTick_ % 2 == 0) OnHealthTick();
             if (!hidden_) {
                 SetWindowPos(hwnd_, HWND_TOPMOST, 0, 0, 0, 0,
