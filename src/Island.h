@@ -16,6 +16,7 @@
 #include "Companion.h"
 #include "Eyes.h"
 #include "Lyrics.h"
+#include "Weather.h"
 #include "MediaService.h"
 #include "Spring.h"
 #include "Watchers.h"
@@ -28,7 +29,7 @@ public:
     int Run();
 
 private:
-    enum class View { Idle, Media, ExpandedMedia, ExpandedIdle, Alert, Timer, Command, Drop, Picker, Note, Ink, Quick };
+    enum class View { Idle, Media, ExpandedMedia, ExpandedIdle, Alert, Timer, Command, Drop, Picker, Note, Ink, Quick, Home };
     enum class AlertKind { Charging, Unplugged, LowBattery, UpdateAvailable, Updating, UpToDate, UpdateFailed, TimerDone, FocusDone, BreakDone,
                            CpuBusy, MemoryFull, Offline, Online, Download,
                            Reminder, ReminderSet, Screenshot, Volume, Headphones, HeadphonesLow, Copied,
@@ -106,7 +107,8 @@ public:
 
 private:
     bool Typing() const { return commandMode_ || noteMode_; }
-    bool ToolsShown(View v) const { return v == View::ExpandedIdle || v == View::ExpandedMedia; }
+    bool ToolsShown(View v) const { return v == View::ExpandedIdle || v == View::ExpandedMedia || v == View::Home; }
+    float CardH(View v) const;  // araçların başladığı yükseklik
     float ToolsTop() const;
     float ToolsX0(float w) const;
     int ToolHit(float x, float y) const;  // araç no; -10/-11: sayfa noktası; -1: yok
@@ -183,6 +185,19 @@ private:
     void SetName(std::wstring name);
     void CycleSleep();
     void OnSleepTick();
+    // 2. parti (Home.cpp): ana sayfa, hava durumu, albüm ışığı, aksesuarlar
+    void DrawHome(float w, float h);
+    int HomeHit(float x, float y) const;
+    void HomeClick(int hit);
+    void SyncFavGlow();
+    void DrawPillGlow(float w, float h, float r);
+    void DrawGuti(float cx, float cy, float u, float bob);
+    void DrawAccessories(float cx, float cy, float u, float bob);
+    void CheckAccessoryUnlocks();
+    void RefreshWeather();
+    void OnWeather(Weather::Info* info);
+    void OnWeatherMood(double now);
+    void SetCity(std::wstring city);
 
     // Çizim
     bool CreateGpu();
@@ -469,4 +484,17 @@ private:
     int sleepRestoreVol_ = -1;
     bool sleepFading_ = false;
     double volQuietUntil_ = 0;  // kendi yaptığımız ses değişikliklerinde gösterge açılmasın
+
+    // Ana sayfa
+    bool homeOn_ = true;
+    bool homeMedia_ = false;  // ana sayfadan büyük müzik kartına geçildi
+    int homeHover_ = -1;
+    Microsoft::WRL::ComPtr<IDWriteTextFormat> fHomeTimer_;
+    // Hava durumu
+    bool weatherOn_ = true;
+    Weather::Info weather_;
+    std::wstring city_;
+    double lastShiver_ = -1e9, lastHeat_ = -1e9;
+    // Albüm ışığı ve aksesuarlar
+    bool albumGlow_ = true, accessories_ = true;
 };

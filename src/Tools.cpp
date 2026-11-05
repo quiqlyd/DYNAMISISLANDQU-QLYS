@@ -58,7 +58,7 @@ float QTrackX1(float w) { return w - 66.f; }
 // ---------------------------------------------------------------------------
 
 float Island::ToolsTop() const {
-    return view_ == View::ExpandedMedia ? MediaCardH() : kExpandedIdle.h;
+    return CardH(view_);
 }
 
 float Island::ToolsX0(float w) const { return (w - kRowW) / 2.f; }
@@ -96,7 +96,7 @@ bool Island::ToolActive(Tool t) const {
 }
 
 void Island::DrawTools(View v, float w) {
-    float top = v == View::ExpandedMedia ? MediaCardH() : kExpandedIdle.h;
+    float top = CardH(v);
     float y0 = top + 4.f, x0 = ToolsX0(w);
     brush_->SetColor(Rgba(1, 1, 1, 0.08f));
     rt_->FillRectangle(D2D1::RectF(18, top - 2, w - 18, top - 1), brush_.Get());

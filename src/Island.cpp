@@ -66,6 +66,11 @@ constexpr UINT kCmdLyrics = 117;
 constexpr UINT kCmdLyricsPill = 118;
 constexpr UINT kCmdRename = 119;
 constexpr UINT kCmdSleep = 120;
+constexpr UINT kCmdHome = 121;
+constexpr UINT kCmdAlbumGlow = 122;
+constexpr UINT kCmdAccessories = 123;
+constexpr UINT kCmdWeather = 124;
+constexpr UINT kCmdCity = 125;
 constexpr UINT kCmdEyeWhite = 130;   // 130-136 hazır renkler
 constexpr UINT kCmdEyeAccent = 140;  // Windows vurgu rengi
 constexpr UINT kCmdEyePick = 141;    // ekrandan seç
@@ -359,6 +364,17 @@ bool Island::Create(HINSTANCE instance) {
     LoadNote();
     LoadLook();
     LoadFavorites();
+    {
+        wchar_t city[64]{};
+        DWORD size = sizeof(city);
+        if (RegGetValueW(HKEY_CURRENT_USER, kSettingsKey, L"City", RRF_RT_REG_SZ, nullptr, city, &size) == ERROR_SUCCESS)
+            city_ = city;
+        homeOn_ = ReadSetting(L"Home", 1) != 0;
+        weatherOn_ = ReadSetting(L"Weather", 1) != 0;
+        albumGlow_ = ReadSetting(L"AlbumGlow", 1) != 0;
+        accessories_ = ReadSetting(L"Accessories", 1) != 0;
+        SetTimer(hwnd_, kTimerWeather, 5000, nullptr);  // açılıştan biraz sonra hava durumu
+    }
     userHidden_ = ReadSetting(L"Hidden", 0) != 0;
     Update();
     Render();
@@ -429,6 +445,7 @@ Island::View Island::TargetView() const {
     if (hover_) {
         if (quickOpen_) return View::Quick;
         if (companion_.Pending()) return View::ExpandedIdle;  // teker çevrilirken süreyi göster
+        if (homeOn_ && !homeMedia_) return View::Home;
         return snapshot_.hasSession ? View::ExpandedMedia : View::ExpandedIdle;
     }
     if (timer) return View::Timer;
@@ -452,6 +469,7 @@ void Island::SetTargets(View v) {
     case View::Note: s = kNote; break;
     case View::Ink: s = kInk; break;
     case View::Quick: s = kQuick; break;
+    case View::Home: s = kHome; break;
     }
     if (ToolsShown(v)) s.h += kToolsH;
     if (ToolsShown(v) && ShelfVisible()) s.h += kShelfH;
@@ -479,7 +497,7 @@ void Island::Update() {
     // İndirme kartı ise tıklanır ve sürüklenir.
     bool interactive = v == View::ExpandedMedia || v == View::ExpandedIdle || IsFileCard() ||
                        v == View::Command || v == View::Drop || v == View::Note || v == View::Ink ||
-                       v == View::Quick || dropArmed_;
+                       v == View::Quick || v == View::Home || dropArmed_;
     LONG_PTR ex = GetWindowLongPtrW(hwnd_, GWL_EXSTYLE);
     LONG_PTR want = interactive ? (ex & ~static_cast<LONG_PTR>(WS_EX_TRANSPARENT))
                                 : (ex | WS_EX_TRANSPARENT);
@@ -492,7 +510,7 @@ void Island::Update() {
 bool Island::NeedsContinuousFrames() const {
     bool mediaVisible = view_ == View::Media || view_ == View::ExpandedMedia;
     // Açık adada Guti hafifçe nefes alır (30 kare/sn yeter).
-    return (mediaVisible && snapshot_.playing) || view_ == View::ExpandedIdle;
+    return (mediaVisible && snapshot_.playing) || view_ == View::ExpandedIdle || view_ == View::Home;
 }
 
 void Island::StartAnimation() {
@@ -787,6 +805,7 @@ bool Island::EnsureResources() {
         fSmallCenter_ = MakeFormat(f, ui, 10.5f, DWRITE_FONT_WEIGHT_NORMAL, aC, true);
         fAa_ = MakeFormat(f, ui, 17.f, DWRITE_FONT_WEIGHT_SEMI_BOLD, aC, false);
         fLyric_ = MakeFormat(f, ui, 13.5f, DWRITE_FONT_WEIGHT_SEMI_BOLD, aL, true);
+        fHomeTimer_ = MakeFormat(f, ui, 24.f, DWRITE_FONT_WEIGHT_SEMI_BOLD, aC, false);
         fNote_ = MakeFormat(f, ui, 13.5f, DWRITE_FONT_WEIGHT_NORMAL, aL, false);
         if (fNote_) {
             fNote_->SetWordWrapping(DWRITE_WORD_WRAPPING_WRAP);
@@ -919,6 +938,7 @@ void Island::Render() {
     D2D1_ROUNDED_RECT edge{D2D1::RectF(0.5f, 0.5f, w - 0.5f, h - 0.5f), r - 0.5f, r - 0.5f};
     brush_->SetColor(Rgba(1, 1, 1, 0.07f));
     rt_->DrawRoundedRectangle(edge, brush_.Get(), 1.f);
+    DrawPillGlow(w, h, r);  // müzik çalarken kapak renginde atan kenar
 
     ComPtr<ID2D1RoundedRectangleGeometry> clip;
     d2d_->CreateRoundedRectangleGeometry(pill, &clip);
@@ -988,6 +1008,7 @@ void Island::DrawView(View v, float w, float h) {
     case View::Note: DrawNote(w, h); break;
     case View::Ink: DrawInkBar(w, h); break;
     case View::Quick: DrawQuick(w, h); break;
+    case View::Home: DrawHome(w, h); break;
     }
     if (ToolsShown(v)) DrawTools(v, w);
     if (ToolsShown(v) && ShelfVisible()) DrawShelf(w);
@@ -1015,7 +1036,8 @@ void Island::DrawView(View v, float w, float h) {
     case View::Media: DrawPrivacyDots(w - 44.f, h / 2); break;
     case View::Timer: DrawPrivacyDots(w - 6.5f, 6.5f); break;
     case View::ExpandedIdle:
-    case View::ExpandedMedia: DrawPrivacyDots(w / 2 + 6.f, 9.f); break;
+    case View::ExpandedMedia:
+    case View::Home: DrawPrivacyDots(w / 2 + 6.f, 9.f); break;
     default: break;
     }
 }
@@ -1184,7 +1206,7 @@ void Island::DrawBars(float right, float centerY, float maxHeight, float barWidt
 
 void Island::DrawIdle(float w, float h) {
     // Boştayken sadece küçük iki göz; üzerine gelince ada açılır.
-    eyes_.Draw(rt_.Get(), d2d_.Get(), brush_.Get(), roundStroke_.Get(), w / 2, h / 2, 0.72f, 0.f);
+    DrawGuti(w / 2, h / 2, 0.72f, 0.f);
 }
 
 void Island::DrawCompactMedia(float w, float h) {
@@ -1203,13 +1225,13 @@ void Island::DrawCompactMedia(float w, float h) {
     if (w >= kMediaLyric.w - 1.f && HasLyrics()) {
         // Söz hapı: kapak, Guti, şu anki satır, ekolayzer
         float ex = pad + side + 22.f;
-        eyes_.Draw(rt_.Get(), d2d_.Get(), brush_.Get(), roundStroke_.Get(), ex, h / 2, 0.62f, bob);
+        DrawGuti(ex, h / 2, 0.62f, bob);
         D2D1_RECT_F area = D2D1::RectF(ex + 22.f, 0, w - (sleepEnd_ > 0 ? 54.f : 38.f), h);
         if (lyricLine_ < 0) Text(snapshot_.title.c_str(), fLyric_.Get(), area, kGray);
         else DrawLyricRows(area, h, true);
         return;
     }
-    eyes_.Draw(rt_.Get(), d2d_.Get(), brush_.Get(), roundStroke_.Get(), w / 2, h / 2, 0.85f, bob);
+    DrawGuti(w / 2, h / 2, 0.85f, bob);
 }
 
 void Island::DrawExpandedMedia(float w, float h) {
@@ -1353,8 +1375,12 @@ void Island::OnMouseMove(float x, float y) {
     if (t != hoverTool_) {
         hoverTool_ = t;
         for (int i = 0; i < kToolCount; ++i) toolGlow_[i].target = i == t ? 1.f : 0.f;
-        for (int i = 0; i <= kFavMax; ++i) favGlow_[i].target = kFavHit + i == t ? 1.f : 0.f;
-        StartAnimation();
+        SyncFavGlow();
+    }
+    int hh = HomeHit(x, y);
+    if (hh != homeHover_) {
+        homeHover_ = hh;
+        SyncFavGlow();
     }
     // Pano listesinde fareyle gezinmek seçimi de kaydırır.
     if (view_ == View::Command && input_.empty() && y > kCommandBar) {
@@ -1399,15 +1425,17 @@ void Island::DrawExpandedIdle(float w, float h) {
         if (mins >= 60) swprintf_s(buf, L"%s · %d sa %d dk", next->text.c_str(), mins / 60, mins % 60);
         else swprintf_s(buf, L"%s · %d dk", next->text.c_str(), mins);
         Text(buf, fDate_.Get(), D2D1::RectF(28, 56, w - 150, 80), kOrange);
-    } else
-        Text(FormatDate(st).c_str(), fDate_.Get(), D2D1::RectF(28, 56, w - 150, 80), kGray);
+    } else {
+        std::wstring date = FormatDate(st);
+        if (weather_.ok && weatherOn_) date += L"  ·  " + Weather::Short(weather_);
+        Text(date.c_str(), fDate_.Get(), D2D1::RectF(28, 56, w - 150, 80), kGray);
+    }
     PopFade();
     h = kExpandedIdle.h;  // raf açıksa alt kısım rafındır
     // Guti hafifçe nefes alır.
     float breath = 1.f + 0.018f * static_cast<float>(std::sin(time_ * 1.9));
     PushFade(s2, 0, 0, 0.85f + 0.15f * s2, w - 128, h / 2);
-    eyes_.Draw(rt_.Get(), d2d_.Get(), brush_.Get(), roundStroke_.Get(), w - 128, h / 2, 1.6f * breath,
-               -0.8f * (breath - 1.f) * 40.f);
+    DrawGuti(w - 128, h / 2, 1.6f * breath, -0.8f * (breath - 1.f) * 40.f);
     PopFade();
     PushFade(s3, 0, 6.f * (1 - s3));
 
@@ -1612,8 +1640,18 @@ void Island::OnClick(float x, float y) {
         QuickClick(QuickHit(x, y));
         return;
     }
+    if (view_ == View::Home) {
+        HomeClick(HomeHit(x, y));
+        return;
+    }
     if (view_ == View::ExpandedMedia) {
         const float pad = 18.f, art = 64.f;
+        if (homeOn_ && homeMedia_ && x >= pad && x <= pad + art && y >= pad && y <= pad + art) {
+            homeMedia_ = false;  // kapağa tıkla: ana sayfaya dön
+            Sounds::Play(Sounds::Sound::Close);
+            Update();
+            return;
+        }
         float cy = pad + art + 14.f + 42.f + LyricsH(), cx = width_.value / 2;
         if (std::fabs(y - cy) < 24) {
             if (std::fabs(x - (cx - 66)) < 24) { media_.Send(MediaCommand::Previous); return; }
@@ -1656,7 +1694,7 @@ double Island::Now() const {
 bool Island::ViewShowsEyes() const {
     return view_ == View::Idle || view_ == View::Media || view_ == View::ExpandedIdle ||
            view_ == View::Timer || view_ == View::Command || view_ == View::Picker ||
-           view_ == View::Note || view_ == View::Ink || view_ == View::Quick ||
+           view_ == View::Note || view_ == View::Ink || view_ == View::Quick || view_ == View::Home ||
            (view_ == View::Alert && alertKind_ == AlertKind::Volume);
 }
 
@@ -1710,7 +1748,10 @@ void Island::MoodWithSound(Eyes::Mood mood, double duration) {
 void Island::SetHover(bool hover) {
     if (hover == hover_) return;
     hover_ = hover;
-    if (!hover) quickOpen_ = false;  // kapanınca bir dahaki açılış yine araçlarla başlar
+    if (!hover) {
+        quickOpen_ = false;
+        homeMedia_ = false;
+    }  // kapanınca bir dahaki açılış yine araçlarla başlar
     Sounds::Play(hover ? Sounds::Sound::Open : Sounds::Sound::Close);
 }
 
@@ -2046,7 +2087,7 @@ void Island::OnDropFiles(const std::vector<std::wstring>& paths) {
 bool Island::ShelfVisible() const { return !shelf_.empty(); }
 
 float Island::ShelfTop() const {
-    return (view_ == View::ExpandedMedia ? MediaCardH() : kExpandedIdle.h) + kToolsH;
+    return CardH(view_) + kToolsH;
 }
 
 int Island::ShelfHit(float x, float y) const {
@@ -2345,11 +2386,11 @@ void Island::RefreshCommandResult() {
     // "fav youtube.com" favorilere ekler, "isim Pıtır" Guti'nin adını değiştirir.
     std::wstring low = input_.substr(0, 8);
     if (!low.empty()) CharLowerBuffW(low.data(), static_cast<DWORD>(low.size()));
-    cmdSpecial_ = low.rfind(L"fav ", 0) == 0 ? 1 : (low.rfind(L"isim ", 0) == 0 ? 2 : 0);
+    cmdSpecial_ = low.rfind(L"fav ", 0) == 0 ? 1 : (low.rfind(L"isim ", 0) == 0 ? 2 : (low.rfind(L"şehir ", 0) == 0 ? 3 : 0));
     if (cmdSpecial_) {
         cmdResult_ = {};
         cmdResult_.kind = Command::Result::Kind::Value;
-        cmdResult_.display = cmdSpecial_ == 1 ? L"+ favori" : L"\u2665 isim";
+        cmdResult_.display = cmdSpecial_ == 1 ? L"+ favori" : (cmdSpecial_ == 2 ? L"\u2665 isim" : L"\u2600 şehir");
     }
     double now = Now();
     if (cmdResult_.divideByZero) {
@@ -2417,6 +2458,8 @@ void Island::AcceptCommand() {
         CloseCommand(true);
         if (special == 2) {
             SetName(arg);
+        } else if (special == 3) {
+            SetCity(arg);
         } else if (!AddFavorite(arg)) {
             eyes_.SetMood(Eyes::Mood::Curious, now, 1.0);  // bunu açamam
             shake_.velocity += 160.f;
@@ -2791,7 +2834,17 @@ void Island::ShowTrayMenu() {
         wcscpy_s(updateLabel, L"Güncelleştir");
     AppendMenuW(settings, MF_STRING | (Sounds::Enabled() ? MF_CHECKED : 0), kCmdSounds, L"Sesler");
     AppendMenuW(settings, MF_STRING | (volumeOsd_ ? MF_CHECKED : 0), kCmdVolumeOsd, L"Ses düzeyi göstergesi");
+    AppendMenuW(settings, MF_STRING | (homeOn_ ? MF_CHECKED : 0), kCmdHome, L"Ana sayfa");
     AppendMenuW(settings, MF_STRING | (albumTint_ ? MF_CHECKED : 0), kCmdAlbumTint, L"Albüm rengi");
+    AppendMenuW(settings, MF_STRING | (albumGlow_ ? MF_CHECKED : 0), kCmdAlbumGlow, L"Albüm ışığı (kapalı ada)");
+    AppendMenuW(settings, MF_STRING | (accessories_ ? MF_CHECKED : 0), kCmdAccessories, L"Aksesuarlar");
+    AppendMenuW(settings, MF_STRING | (weatherOn_ ? MF_CHECKED : 0), kCmdWeather, L"Hava durumu");
+    {
+        wchar_t cityLabel[128];
+        std::wstring shown = !city_.empty() ? city_ : (weather_.ok && !weather_.city.empty() ? weather_.city + L" (otomatik)" : L"otomatik");
+        swprintf_s(cityLabel, L"Şehir: %s (değiştir)…", shown.c_str());
+        AppendMenuW(settings, MF_STRING | (weatherOn_ ? 0 : MF_GRAYED), kCmdCity, cityLabel);
+    }
     AppendMenuW(settings, MF_STRING | (lyricsOn_ ? MF_CHECKED : 0), kCmdLyrics, L"Şarkı sözleri (internetten)");
     AppendMenuW(settings, MF_STRING | (lyricsPill_ ? MF_CHECKED : 0) | (lyricsOn_ ? 0 : MF_GRAYED), kCmdLyricsPill,
                 L"Kapalı adada şarkı sözü");
@@ -2875,6 +2928,34 @@ void Island::ShowTrayMenu() {
     if (cmd == kCmdCommand) {
         if (userHidden_) ToggleUserHidden();
         OpenCommand();
+    }
+    if (cmd == kCmdHome) {
+        homeOn_ = !homeOn_;
+        WriteSetting(L"Home", homeOn_ ? 1 : 0);
+        Update();
+    }
+    if (cmd == kCmdAlbumGlow) {
+        albumGlow_ = !albumGlow_;
+        WriteSetting(L"AlbumGlow", albumGlow_ ? 1 : 0);
+        StartAnimation();
+    }
+    if (cmd == kCmdAccessories) {
+        accessories_ = !accessories_;
+        WriteSetting(L"Accessories", accessories_ ? 1 : 0);
+        StartAnimation();
+    }
+    if (cmd == kCmdWeather) {
+        weatherOn_ = !weatherOn_;
+        WriteSetting(L"Weather", weatherOn_ ? 1 : 0);
+        if (weatherOn_) RefreshWeather();
+        else weather_ = {};
+        StartAnimation();
+    }
+    if (cmd == kCmdCity) {
+        if (userHidden_) ToggleUserHidden();
+        OpenCommand();
+        input_ = L"şehir ";
+        RefreshCommandResult();
     }
     if (cmd == kCmdAlbumTint) {
         albumTint_ = !albumTint_;
@@ -3064,6 +3145,8 @@ LRESULT Island::WndProc(UINT msg, WPARAM wp, LPARAM lp) {
         if (ToolsShown(view_)) {
             int t = ToolHit(GET_X_LPARAM(lp) / scale_ - kPad, GET_Y_LPARAM(lp) / scale_);
             if (t >= kFavHit && t < kFavHit + kFavMax) RemoveFavorite(t - kFavHit);
+            int hh = HomeHit(GET_X_LPARAM(lp) / scale_ - kPad, GET_Y_LPARAM(lp) / scale_);
+            if (hh >= 50 && hh < 54) RemoveFavorite(hh - 50);
         }
         return 0;
 
@@ -3076,6 +3159,10 @@ LRESULT Island::WndProc(UINT msg, WPARAM wp, LPARAM lp) {
         if (domain) OnFavicon(*domain);
         return 0;
     }
+
+    case Weather::WM_WEATHER:
+        OnWeather(reinterpret_cast<Weather::Info*>(lp));
+        return 0;
 
     case WM_DWMCOLORIZATIONCOLORCHANGED:
         if (eyeMode_ == 2) ApplyEyeColor();  // Windows vurgu rengi değişti
@@ -3190,6 +3277,7 @@ LRESULT Island::WndProc(UINT msg, WPARAM wp, LPARAM lp) {
             StartAnimation();
             break;
         case kTimerLyrics: StartLyricsFetch(); break;
+        case kTimerWeather: RefreshWeather(); break;
         case kTimerSleepRestore:
             KillTimer(hwnd_, kTimerSleepRestore);
             if (sleepRestoreVol_ >= 0) {
@@ -3213,6 +3301,8 @@ LRESULT Island::WndProc(UINT msg, WPARAM wp, LPARAM lp) {
             if (CheckSlim()) Update();
             OnCompanionTick();
             OnSleepTick();
+            OnWeatherMood(Now());
+            if (healthTick_ % 10 == 0) CheckAccessoryUnlocks();
             OnPrivacyTick();
             CheckReminders();
             UpdatePerf();
