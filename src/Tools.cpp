@@ -12,6 +12,7 @@
 #include <cmath>
 #include <cstdio>
 #include <cstring>
+#include <cwchar>
 
 using Microsoft::WRL::ComPtr;
 using namespace isl;
@@ -910,4 +911,61 @@ void Island::DrawQuick(float w, float h) {
     Text(L"Tüm ayarlar", fSmallRight_.Get(), D2D1::RectF(w - 170, by, w - 40, by + 32), kGray);
     Text(kGlyphOpen, fIconSmall_.Get(), D2D1::RectF(w - 36, by, w - 18, by + 32), kGray);
     eyes_.Draw(rt_.Get(), d2d_.Get(), brush_.Get(), roundStroke_.Get(), w / 2, by + 16, 0.6f, 0.f);
+}
+
+// ---------------------------------------------------------------------------
+// Sekmelerle barış: üstte büyük bir pencere varken ince hap
+// ---------------------------------------------------------------------------
+
+bool Island::CheckSlim() {
+    bool slim = false;
+    HWND fg = GetForegroundWindow();
+    if (fg && fg != hwnd_ && fg != ink_ && IsWindowVisible(fg) && !IsIconic(fg)) {
+        wchar_t cls[64] = L"";
+        GetClassNameW(fg, cls, 64);
+        if (wcscmp(cls, L"Progman") != 0 && wcscmp(cls, L"WorkerW") != 0 && wcscmp(cls, L"Shell_TrayWnd") != 0) {
+            RECT r{};
+            LONG cx = (monitor_.left + monitor_.right) / 2;
+            // Penceresi ekranın en üstüne dayanıyorsa (büyütülmüş tarayıcı vb.) başlık/sekme alanı adanın altında.
+            if (GetWindowRect(fg, &r)) slim = r.top <= monitor_.top + 12 && r.left < cx && r.right > cx;
+        }
+    }
+    if (slim == slim_) return false;
+    slim_ = slim;
+    return true;
+}
+
+// ---------------------------------------------------------------------------
+// Müzik kartı: sarma ve ses
+// ---------------------------------------------------------------------------
+
+namespace {
+constexpr float kMPad = 18.f, kMProgY = 18.f + 64.f + 14.f, kMCtrlY = kMProgY + 42.f;
+}
+
+int Island::MediaHit(float x, float y) const {
+    if (view_ != View::ExpandedMedia) return -1;
+    float w = viewW_;
+    if (snapshot_.durationSec > 0 && std::fabs(y - (kMProgY + 2.f)) <= 8.f && x >= kMPad - 6.f && x <= w - kMPad + 6.f)
+        return 20;
+    if (std::fabs(y - kMCtrlY) <= 12.f && x >= w - 108.f && x <= w - kMPad + 6.f) return 21;
+    return -1;
+}
+
+void Island::MediaSlider(int which, float x) {
+    float w = viewW_;
+    if (which == 2) {
+        float frac = std::clamp((x - kMPad) / (w - 2 * kMPad), 0.f, 1.f);
+        seekPreview_ = frac * snapshot_.durationSec;
+    } else {
+        float x0 = w - 88.f, x1 = w - kMPad;
+        int pct = static_cast<int>(std::lround(std::clamp((x - x0) / (x1 - x0), 0.f, 1.f) * 100.f));
+        if (pct != volume_ || muted_) {
+            volume_ = pct;
+            muted_ = false;
+            VolumeWatch::Set(pct);
+        }
+    }
+    lastActivity_ = Now();
+    StartAnimation();
 }

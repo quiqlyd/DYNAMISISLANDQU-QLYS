@@ -37,6 +37,7 @@ public:
     void Start(HWND notifyWindow);
     MediaSnapshot Snapshot();
     void Send(MediaCommand cmd);
+    void Seek(double seconds);  // şarkıda bu saniyeye atla
 
 private:
     using Manager = winrt::Windows::Media::Control::GlobalSystemMediaTransportControlsSessionManager;

@@ -24,6 +24,8 @@ constexpr float kMaxW = 420.f, kMaxH = 300.f;
 struct Size3 { float w, h, r; };
 constexpr Size3 kIdle{78, 22, 11};
 constexpr Size3 kMedia{236, 34, 17};
+// Üstte büyütülmüş bir pencere (ör. tarayıcı sekmeleri) varken müzik hapı incelir.
+constexpr Size3 kMediaSlim{150, 30, 15};
 constexpr Size3 kExpandedMedia{400, 164, 40};
 constexpr Size3 kExpandedIdle{380, 96, 36};
 constexpr Size3 kAlert{300, 40, 20};

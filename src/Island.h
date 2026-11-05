@@ -145,6 +145,9 @@ private:
     void QuickSlider(int which, float x);
     void QuickClick(int hit);
     void DrawQuick(float w, float h);
+    bool CheckSlim();
+    int MediaHit(float x, float y) const;  // 20: ilerleme çubuğu, 21: ses
+    void MediaSlider(int which, float x);
 
     // Çizim
     bool CreateGpu();
@@ -386,5 +389,13 @@ private:
     int brightness_ = -1;   // 0-100, 255: desteklenmiyor, -1: okunuyor
     int sliderDrag_ = -1;   // 0 parlaklık, 1 ses
     int nightLight_ = -1;   // 1 açık, 0 kapalı, -1 bilinmiyor
+    // Sekmelerin üstünde ezmesin: ince hap, üstünden geçerken saydamlaşma, durunca açılma
+    bool slim_ = false;
+    Spring ghost_;
+    POINT hoverAnchor_{};
+    double lastMoveOver_ = -1e9;
+    // Müzik kartı: ilerleme çubuğundan sarma ve ses sürgüsü (sliderDrag_ 2 / 3)
+    double seekPreview_ = 0;
+    int mediaHover_ = -1;
     double brightSetAt_ = -1e9;  // son elle ayar: eski yankılar sürgüyü geri itmesin
 };
