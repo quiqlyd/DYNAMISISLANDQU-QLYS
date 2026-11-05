@@ -215,6 +215,7 @@ void Island::StartUpdate() {
 // ---------------------------------------------------------------------------
 
 void Island::StartOcr() {
+    if (ink_) return;  // çizim tuvali ekranı tutuyor
     CloseCommand(false);
     CloseNote(false);
     if (userHidden_) ToggleUserHidden();
@@ -337,10 +338,11 @@ void Island::SaveNote() {
 
 void Island::OpenNote() {
     if (noteMode_) return;
+    HWND keep = prevForeground_;  // komut çubuğundan geçiliyorsa asıl uygulamayı unutma
     CloseCommand(false);
     if (userHidden_) ToggleUserHidden();
     HWND fg = GetForegroundWindow();
-    prevForeground_ = fg != hwnd_ ? fg : nullptr;
+    prevForeground_ = fg != hwnd_ ? fg : keep;
     noteMode_ = true;
     hover_ = false;
     quickOpen_ = false;
@@ -372,20 +374,32 @@ void Island::OnNoteChar(wchar_t c) {
         break;
     case 8:
         if (!note_.empty()) note_.pop_back();
+        if (!note_.empty() && IS_HIGH_SURROGATE(note_.back())) note_.pop_back();  // emoji yarım kalmasın
         break;
     case 127:  // Ctrl+Geri sil: kelime sil
         while (!note_.empty() && (note_.back() == L' ' || note_.back() == L'\n')) note_.pop_back();
         while (!note_.empty() && note_.back() != L' ' && note_.back() != L'\n') note_.pop_back();
         break;
-    case 22:  // Ctrl+V
-        if (!clips_.empty()) {
-            for (wchar_t ch : clips_[0]) {
+    case 22: {  // Ctrl+V: panodaki güncel yazı
+        std::wstring paste;
+        if (IsClipboardFormatAvailable(CF_UNICODETEXT) && OpenClipboard(hwnd_)) {
+            if (HANDLE hd = GetClipboardData(CF_UNICODETEXT)) {
+                if (auto* p = static_cast<const wchar_t*>(GlobalLock(hd))) {
+                    paste.assign(p, wcsnlen(p, kNoteMax));
+                    GlobalUnlock(hd);
+                }
+            }
+            CloseClipboard();
+        }
+        {
+            for (wchar_t ch : paste) {
                 if (note_.size() >= kNoteMax) break;
                 if (ch == L'\r') continue;
                 note_ += ch == L'\t' ? L' ' : ch;
             }
         }
         break;
+    }
     default:
         if (c < 32 || note_.size() >= kNoteMax) return;
         note_ += c;
@@ -447,7 +461,13 @@ LRESULT CALLBACK Island::InkProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
     if (self && self->ink_ == hwnd) {
         switch (msg) {
         case WM_SETCURSOR: SetCursor(LoadCursorW(nullptr, IDC_CROSS)); return TRUE;
-        case WM_MOUSEACTIVATE: return MA_ACTIVATE;
+        case WM_MOUSEACTIVATE:
+            // Tıklayınca öne çıkmasın: palet (ada) hep tuvalin üstünde kalmalı.
+            SetWindowPos(self->hwnd_, HWND_TOPMOST, 0, 0, 0, 0, SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE);
+            return MA_NOACTIVATE;
+        case WM_ACTIVATE:
+            SetWindowPos(self->hwnd_, HWND_TOPMOST, 0, 0, 0, 0, SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE);
+            break;
         case WM_LBUTTONDOWN:
             SetCapture(hwnd);
             self->inkDown_ = true;
@@ -765,6 +785,7 @@ void Island::QuickSlider(int which, float x) {
     if (which == 0) {
         if (brightness_ < 0 || brightness_ > 100 || pct == brightness_) return;
         brightness_ = pct;
+        brightSetAt_ = Now();
         Brightness::Set(hwnd_, pct);
     } else {
         if (pct == volume_ && !muted_) return;

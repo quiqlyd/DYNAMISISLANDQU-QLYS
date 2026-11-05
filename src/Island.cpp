@@ -407,6 +407,7 @@ void Island::SetTargets(View v) {
 }
 
 void Island::Update() {
+    if (!hover_) quickOpen_ = false;  // ada kapanınca bir dahaki açılış araçlarla başlar
     View v = TargetView();
     if (v != view_) {
         // Eski içerik sönerken yenisi yerine otursun.
@@ -1696,7 +1697,8 @@ void Island::OnClipboardUpdate() {
     if (ocrPending_) {
         // "Yazı al" ile seçilen alan geldi: kart yerine Guti okusun.
         ocrPending_ = false;
-        if (now - ocrAskedAt_ < 120.0) {
+        lastShot_ = now;  // alan seçici panoya iki kez yazabilir: ikincisi kart açmasın
+        if (now - ocrAskedAt_ < 60.0) {
             ComPtr<IWICBitmap> bmp = ClipboardBitmap();
             if (bmp && RunOcr(bmp.Get())) return;
             OnOcrDone(-2, L"");
@@ -1773,6 +1775,7 @@ IWICImagingFactory* Island::Wic() {
 }
 
 void Island::TakeScreenshot() {
+    ocrPending_ = false;  // vazgeçilmiş bir "yazı al" bu görüntüyü okumasın
     // Windows'un kendi alan seçicisi; görüntü panoya gelince Guti kartı gösterir.
     ShellExecuteW(nullptr, L"open", L"ms-screenclip:", nullptr, nullptr, SW_SHOWNORMAL);
 }
@@ -2078,7 +2081,7 @@ LRESULT CALLBACK Island::PickerProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
 }
 
 void Island::StartPicker() {
-    if (picker_) return;
+    if (picker_ || ink_) return;
     if (commandMode_) CloseCommand(false);
     static bool registered = false;
     if (!registered) {
@@ -2164,8 +2167,10 @@ float Island::CommandHeight() const {
 
 void Island::OpenCommand() {
     if (commandMode_) return;
+    HWND keep = prevForeground_;  // nottan geçiliyorsa asıl uygulamayı unutma
+    CloseNote(false);
     HWND fg = GetForegroundWindow();
-    prevForeground_ = fg != hwnd_ ? fg : nullptr;
+    prevForeground_ = fg != hwnd_ ? fg : keep;
     commandMode_ = true;
     input_.clear();
     cmdResult_ = {};
@@ -2856,7 +2861,11 @@ LRESULT Island::WndProc(UINT msg, WPARAM wp, LPARAM lp) {
         return 0;
 
     case Brightness::WM_BRIGHTNESS:
-        if (sliderDrag_ != 0 || wp == 255) brightness_ = static_cast<int>(wp);
+        if (wp == 255) {
+            if (brightness_ < 0) brightness_ = 255;  // okunamadı: desteklenmiyor (tek bir yazma hatası değil)
+        } else if (sliderDrag_ != 0 && Now() - brightSetAt_ > 1.0) {
+            brightness_ = static_cast<int>(wp);
+        }
         StartAnimation();
         return 0;
 
@@ -2996,9 +3005,10 @@ LRESULT Island::WndProc(UINT msg, WPARAM wp, LPARAM lp) {
                 int hit = QuickHit(x, y);
                 if (hit == 10 && brightness_ >= 0 && brightness_ <= 100) {
                     brightness_ = std::clamp(brightness_ + notches * 5, 0, 100);
+                    brightSetAt_ = Now();
                     Brightness::Set(hwnd_, brightness_);
                 } else if (hit == 11 && volume_ >= 0) {
-                    volume_ = std::clamp((muted_ ? 0 : volume_) + notches * 2, 0, 100);
+                    volume_ = std::clamp(volume_ + notches * 2, 0, 100);
                     muted_ = false;
                     VolumeWatch::Set(volume_);
                 }
