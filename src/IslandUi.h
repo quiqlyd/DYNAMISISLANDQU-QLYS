@@ -51,6 +51,7 @@ constexpr Size3 kNote{380, 160, 28};
 constexpr Size3 kInk{300, 44, 22};
 constexpr Size3 kQuick{380, 196, 36};
 constexpr Size3 kHome{400, 132, 36};
+constexpr Size3 kDiary{380, 168, 34};
 
 // Segoe Fluent Icons
 constexpr wchar_t kGlyphPrev[] = L"\xE892";
@@ -85,6 +86,9 @@ constexpr wchar_t kGlyphBack[] = L"\xE72B";
 constexpr wchar_t kGlyphDelete[] = L"\xE74D";
 constexpr wchar_t kGlyphUndo[] = L"\xE7A7";
 constexpr wchar_t kGlyphOpen[] = L"\xE8A7";
+constexpr wchar_t kGlyphHeart[] = L"\xEB51";
+constexpr wchar_t kGlyphHeartFill[] = L"\xEB52";
+constexpr wchar_t kGlyphBook[] = L"\xE82D";
 
 constexpr wchar_t kRunKey[] = L"Software\\Microsoft\\Windows\\CurrentVersion\\Run";
 constexpr wchar_t kRunValue[] = L"DynamisIsland";
