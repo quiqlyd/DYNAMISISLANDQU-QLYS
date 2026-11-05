@@ -6,7 +6,9 @@
 #include <wrl/client.h>
 #include <chrono>
 #include <string>
+#include <vector>
 
+#include "Command.h"
 #include "Companion.h"
 #include "Eyes.h"
 #include "MediaService.h"
@@ -21,9 +23,10 @@ public:
     int Run();
 
 private:
-    enum class View { Idle, Media, ExpandedMedia, ExpandedIdle, Alert, Timer };
+    enum class View { Idle, Media, ExpandedMedia, ExpandedIdle, Alert, Timer, Command, Drop, Picker };
     enum class AlertKind { Charging, Unplugged, LowBattery, UpdateAvailable, Updating, UpToDate, UpdateFailed, TimerDone, FocusDone, BreakDone,
-                           CpuBusy, MemoryFull, Offline, Online, Download };
+                           CpuBusy, MemoryFull, Offline, Online, Download,
+                           Reminder, ReminderSet, Screenshot, Volume, Headphones, HeadphonesLow, Copied };
 
     static LRESULT CALLBACK StaticWndProc(HWND, UINT, WPARAM, LPARAM);
     LRESULT WndProc(UINT msg, WPARAM wp, LPARAM lp);
@@ -46,9 +49,45 @@ private:
     void OnPrivacyTick();
     void OnClipboardUpdate();
     void OnDownload(const std::wstring& path);
-    void OpenDownloadFolder();
-    void StartDownloadDrag();
-    bool IsDownloadAlert() const { return alertActive_ && alertKind_ == AlertKind::Download; }
+        // Komut çubuğu: hesap, birim, hatırlatıcı, pano geçmişi
+    void OpenCommand();
+    void CloseCommand(bool restoreFocus);
+    void OnCommandChar(wchar_t c);
+    void OnCommandKey(UINT vk);
+    void AcceptCommand();
+    void RefreshCommandResult();
+    float CommandHeight() const;
+    int VisibleClips() const;
+    void CaptureClipboardText();
+    void CopyToClipboard(const std::wstring& text);
+    void CheckReminders();
+    void LoadReminders();
+    void SaveReminders();
+    bool IsFileCard() const {
+        return alertActive_ && (alertKind_ == AlertKind::Download || alertKind_ == AlertKind::Screenshot);
+    }
+    // Ekran görüntüsü ve dosya rafı
+    friend class DropTarget;
+    bool DragFiles(const std::vector<std::wstring>& paths);
+    void OpenCard();
+    void StartCardDrag();
+    void TakeScreenshot();
+    bool SaveClipboardImage();
+    void OnDropEnter();
+    void OnDropLeave();
+    void OnDropFiles(const std::vector<std::wstring>& paths);
+    float ShelfTop() const;
+    int ShelfHit(float x, float y) const;
+    bool ShelfVisible() const;
+    ID2D1Bitmap* ShelfIcon(size_t i);
+    IWICImagingFactory* Wic();
+    // Ses göstergesi, kulaklık pili, renk seçici
+    void OnVolume(int percent, bool muted);
+    void OnBtBattery(int level, const std::wstring& name);
+    void StartPicker();
+    void EndPicker(bool pick);
+    void OnPickerMove();
+    static LRESULT CALLBACK PickerProc(HWND, UINT, WPARAM, LPARAM);
 
     // Çizim
     bool EnsureResources();
@@ -61,6 +100,12 @@ private:
     void DrawAlert(float w, float h);
     void DrawTimer(float w, float h);
     void DrawDownload(float w, float h);
+    void DrawCommand(float w, float h);
+    void DrawScreenshot(float w, float h);
+    void DrawShelf(float w);
+    void DrawDrop(float w, float h);
+    void DrawPicker(float w, float h);
+    void DrawVolume(float w, float h);
     void DrawPrivacyDots(float right, float cy);
     std::wstring TimerText() const;
     D2D1_COLOR_F TimerColor() const;
@@ -111,7 +156,7 @@ private:
     Microsoft::WRL::ComPtr<ID2D1Bitmap> artBitmap_;
     Microsoft::WRL::ComPtr<ID2D1StrokeStyle> roundStroke_;
     Microsoft::WRL::ComPtr<IDWriteTextFormat> fClock_, fTitle_, fArtist_, fSmall_, fSmallRight_,
-        fBigClock_, fDate_, fTiny_, fTinyRight_, fIcon_, fIconBig_, fIconSmall_, fAlert_, fAlertRight_;
+        fBigClock_, fDate_, fTiny_, fTinyRight_, fIcon_, fIconBig_, fIconSmall_, fAlert_, fAlertRight_, fSmallCenter_;
 
     // Animasyon
     Spring width_, height_, radius_, shake_;
@@ -162,12 +207,48 @@ private:
     double lastCpuAlert_ = -1e9, lastRamAlert_ = -1e9;
     double lastShot_ = -1e9;
     double lastSweat_ = -1e9;
-    std::wstring downloadPath_;
+    std::wstring cardPath_;
     // Müziğe gerçek ritimle dans
     AudioMeter meter_;
     float level_ = -1.f;     // ekranda gösterilen seviye (hızlı yükselir, yavaş iner)
     float avgLevel_ = 0.f;   // uzun ortalama: vuruşu bunun üstündeki sıçrama belirler
     float beatPulse_ = 0.f;  // vuruştan sonra sönen zıplama
     double lastBeat_ = 0;
+    // Komut çubuğu
+    bool commandMode_ = false;
+    HWND prevForeground_ = nullptr;
+    std::wstring input_;
+    Command::Result cmdResult_;
+    int clipSel_ = 0;
+    std::vector<std::wstring> clips_;  // sadece bellekte, diske yazılmaz
+    struct Reminder {
+        ULONGLONG at;  // duvar saati, saniye
+        std::wstring text;
+    };
+    std::vector<Reminder> reminders_;
+    std::wstring alertLabel_;
+    // Ekran görüntüsü + raf
+    Microsoft::WRL::ComPtr<IWICImagingFactory> wic_;
+    Microsoft::WRL::ComPtr<IWICBitmap> shotThumb_;   // küçültülmüş önizleme
+    Microsoft::WRL::ComPtr<ID2D1Bitmap> shotBitmap_;
+    struct ShelfItem {
+        std::wstring path;
+        Microsoft::WRL::ComPtr<ID2D1Bitmap> icon;
+    };
+    std::vector<ShelfItem> shelf_;
+    class DropTarget* dropTarget_ = nullptr;
+    bool dropArmed_ = false;   // dışarıdan sürükleme gelirken ada tıklanabilir olur
+    bool dropHover_ = false;   // dosya şu an adanın üstünde
+    bool lastLeftDown_ = false, downStartedOver_ = false;
+    // Ses / kulaklık / renk
+    double startedAt_ = 0;
+    int volume_ = -1;
+    bool muted_ = false;
+    bool volumeOsd_ = true;
+    int btLevel_ = 255;
+    std::wstring btName_;
+    bool btLowShown_ = false;
+    HWND picker_ = nullptr;
+    COLORREF pickColor_ = 0;
     double swallowUpUntil_ = 0;  // indirme kartına basınca gelen bırakma tıklamasını yut
 };

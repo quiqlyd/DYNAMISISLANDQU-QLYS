@@ -242,6 +242,7 @@ void Arc(ID2D1RenderTarget* rt, ID2D1Factory* f, ID2D1Brush* b, ID2D1StrokeStyle
 void Eyes::Draw(ID2D1RenderTarget* rt, ID2D1Factory* f, ID2D1SolidColorBrush* brush,
                 ID2D1StrokeStyle* round, float cx, float cy, float u, float bob) const {
     const float eyeW = 9.f * u, eyeH = 14.f * u, spacing = 23.f * u;
+    const D2D1_COLOR_F eyeColor = tinted_ ? tint_ : kEye;
 
     auto c01 = [](float v) { return std::clamp(v, 0.f, 1.f); };
     float happy = c01(happy_.value), heart = std::clamp(heart_.value, 0.f, 1.3f),
@@ -273,7 +274,7 @@ void Eyes::Draw(ID2D1RenderTarget* rt, ID2D1Factory* f, ID2D1SolidColorBrush* br
         if (dizzy > 0.5f) {
             // > <
             float s = 4.5f * u, a = (dizzy - 0.5f) * 2.f, d = inner;
-            brush->SetColor(A(kEye, a));
+            brush->SetColor(A(eyeColor, a));
             ComPtr<ID2D1PathGeometry> path;
             ComPtr<ID2D1GeometrySink> sink;
             if (SUCCEEDED(f->CreatePathGeometry(&path)) && SUCCEEDED(path->Open(&sink))) {
@@ -299,7 +300,7 @@ void Eyes::Draw(ID2D1RenderTarget* rt, ID2D1Factory* f, ID2D1SolidColorBrush* br
             if (open < 0.3f) w = eyeW * 1.15f;
             float r = std::min(w, h) / 2.f;
             float top = ey - h / 2, bottom = ey + h / 2;
-            brush->SetColor(A(kEye, bodyAlpha));
+            brush->SetColor(A(eyeColor, bodyAlpha));
             rt->FillRoundedRectangle(
                 D2D1::RoundedRect(D2D1::RectF(ex - w / 2, top, ex + w / 2, bottom), r, r), brush);
 
@@ -348,7 +349,7 @@ void Eyes::Draw(ID2D1RenderTarget* rt, ID2D1Factory* f, ID2D1SolidColorBrush* br
         }
 
         if (arcAlpha > 0.01f) {
-            brush->SetColor(A(kEye, arcAlpha));
+            brush->SetColor(A(eyeColor, arcAlpha));
             Arc(rt, f, brush, round, ex, ey, eyeW * 0.75f, 6.f * u, 2.6f * u);
         }
 
