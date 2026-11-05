@@ -199,3 +199,16 @@ void MediaService::Send(MediaCommand cmd) {
         }
     }).detach();
 }
+
+void MediaService::Seek(double seconds) {
+    Session s = CurrentSession();
+    if (!s) return;
+    int64_t ticks = static_cast<int64_t>((seconds < 0 ? 0 : seconds) * 10000000.0);  // 100 ns birimi
+    std::thread([s, ticks] {
+        winrt::init_apartment(winrt::apartment_type::multi_threaded);
+        try {
+            s.TryChangePlaybackPositionAsync(ticks).get();
+        } catch (...) {
+        }
+    }).detach();
+}

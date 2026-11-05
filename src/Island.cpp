@@ -241,6 +241,9 @@ bool Island::Create(HINSTANCE instance) {
     selY_.damping = 38.f;
     volBar_.stiffness = 260.f;
     volBar_.damping = 30.f;
+    ghost_.Snap(1.f);
+    ghost_.stiffness = 220.f;
+    ghost_.damping = 30.f;
     pageX_.stiffness = 260.f;
     pageX_.damping = 28.f;
     for (auto& g : toolGlow_) {
@@ -385,7 +388,7 @@ void Island::SetTargets(View v) {
     Size3 s = kIdle;
     switch (v) {
     case View::Idle: s = kIdle; break;
-    case View::Media: s = kMedia; break;
+    case View::Media: s = slim_ ? kMediaSlim : kMedia; break;
     case View::ExpandedMedia: s = kExpandedMedia; break;
     case View::ExpandedIdle: s = kExpandedIdle; break;
     case View::Alert:
@@ -520,6 +523,7 @@ void Island::OnAnimationTick() {
         moving |= selY_.Step(step);
         moving |= volBar_.Step(step);
         moving |= pageX_.Step(step);
+        moving |= ghost_.Step(step);
         for (auto& g : toolGlow_) moving |= g.Step(step);
     }
     if (trans_ < 1.f) {
@@ -896,7 +900,9 @@ void Island::Render() {
               monitor_.top + static_cast<LONG>(std::lround(kTopMargin * scale_))};
     SIZE size{pxW, pxH};
     POINT src{0, 0};
-    BLENDFUNCTION blend{AC_SRC_OVER, 0, 255, AC_SRC_ALPHA};
+    // Fare sekmelerin üstünde gezinirken ada saydamlaşır: altındaki sekme görünür.
+    BYTE alpha = static_cast<BYTE>(255.f * std::clamp(ghost_.value, 0.12f, 1.f));
+    BLENDFUNCTION blend{AC_SRC_OVER, 0, alpha, AC_SRC_ALPHA};
     if (gpu_) {
         HDC dc = nullptr;
         if (SUCCEEDED(surface_->GetDC(FALSE, &dc))) {
@@ -1156,14 +1162,23 @@ void Island::DrawExpandedMedia(float w, float h) {
     PushFade(s2, 0, 5.f * (1 - s2));
     float py = pad + art + 14.f;
     double dur = snapshot_.durationSec, pos = snapshot_.CurrentPosition();
-    D2D1_ROUNDED_RECT track{D2D1::RectF(pad, py, w - pad, py + 4), 2, 2};
+    bool seeking = sliderDrag_ == 2 && !drawingOld_;
+    if (seeking) pos = seekPreview_;
+    // Üstüne gelince çubuk kalınlaşır, tutup sürükleyince şarkı oraya sarılır.
+    float thick = (seeking || mediaHover_ == 20) ? 3.f : 2.f;
+    D2D1_ROUNDED_RECT track{D2D1::RectF(pad, py + 2 - thick, w - pad, py + 2 + thick), thick, thick};
     brush_->SetColor(Rgba(1, 1, 1, 0.18f));
     rt_->FillRoundedRectangle(track, brush_.Get());
     if (dur > 0) {
         float fx = pad + (w - pad * 2) * static_cast<float>(std::clamp(pos / dur, 0.0, 1.0));
-        D2D1_ROUNDED_RECT fill{D2D1::RectF(pad, py, std::max(pad + 4, fx), py + 4), 2, 2};
+        D2D1_ROUNDED_RECT fill{D2D1::RectF(pad, py + 2 - thick, std::max(pad + 4, fx), py + 2 + thick), thick, thick};
         brush_->SetColor(WithAlpha(kWhite, 0.9f));
         rt_->FillRoundedRectangle(fill, brush_.Get());
+        if (seeking || mediaHover_ == 20) {
+            brush_->SetColor(kWhite);
+            float kr = seeking ? 7.f : 5.f;
+            rt_->FillEllipse(D2D1::Ellipse(D2D1::Point2F(fx, py + 2), kr, kr), brush_.Get());
+        }
         Text(FormatDuration(pos).c_str(), fSmall_.Get(), D2D1::RectF(pad, py + 6, w / 2, py + 20), kGray);
         Text((L"-" + FormatDuration(std::max(0.0, dur - pos))).c_str(), fSmallRight_.Get(),
                  D2D1::RectF(w / 2, py + 6, w - pad, py + 20), kGray);
@@ -1175,6 +1190,31 @@ void Island::DrawExpandedMedia(float w, float h) {
     float s3 = Stagger(3);
     PushFade(s3, 0, 6.f * (1 - s3));
     float cy = py + 42.f, cx = w / 2;
+    {
+        // Sağda küçük ses sürgüsü
+        if (volume_ < 0) {
+            int v = 0;
+            bool m = false;
+            if (VolumeWatch::Get(v, m)) {
+                volume_ = v;
+                muted_ = m;
+            }
+        }
+        bool silent = muted_ || volume_ <= 0;
+        Text(silent ? kGlyphMute : kGlyphVolume, fIconSmall_.Get(), D2D1::RectF(w - 112, cy - 10, w - 92, cy + 10), kGray);
+        float x0 = w - 88, x1 = w - pad;
+        float vt = (sliderDrag_ == 3 || mediaHover_ == 21) ? 2.5f : 2.f;
+        brush_->SetColor(Rgba(1, 1, 1, 0.18f));
+        rt_->FillRoundedRectangle(D2D1_ROUNDED_RECT{D2D1::RectF(x0, cy - vt, x1, cy + vt), vt, vt}, brush_.Get());
+        if (volume_ >= 0) {
+            float fx = x0 + (x1 - x0) * (silent ? 0.f : volume_ / 100.f);
+            brush_->SetColor(WithAlpha(kWhite, 0.85f));
+            rt_->FillRoundedRectangle(D2D1_ROUNDED_RECT{D2D1::RectF(x0, cy - vt, std::max(x0 + 4, fx), cy + vt), vt, vt},
+                                      brush_.Get());
+            if (sliderDrag_ == 3 || mediaHover_ == 21)
+                rt_->FillEllipse(D2D1::Ellipse(D2D1::Point2F(fx, cy), 5.f, 5.f), brush_.Get());
+        }
+    }
     const float offs[3] = {-66.f, 0.f, 66.f};
     for (int i = 0; i < 3; ++i) {
         float bx = cx + offs[i];
@@ -1213,8 +1253,14 @@ void Island::OnMouseMove(float x, float y) {
         trackingLeave_ = TrackMouseEvent(&tme) != FALSE;
     }
     if (sliderDrag_ >= 0) {
-        QuickSlider(sliderDrag_, x);
+        if (sliderDrag_ >= 2) MediaSlider(sliderDrag_, x);
+        else QuickSlider(sliderDrag_, x);
         return;
+    }
+    int mh = MediaHit(x, y);
+    if (mh != mediaHover_) {
+        mediaHover_ = mh;
+        StartAnimation();
     }
     int b = ButtonAt(x, y);
     if (b != hoverBtn_) {
@@ -1979,7 +2025,7 @@ void Island::OnVolume(int percent, bool muted) {
     bool wasMuted = muted_;
     volume_ = percent;
     muted_ = muted;
-    if (view_ == View::Quick) {  // hızlı ayarlarda sürgü zaten gösteriyor
+    if (view_ == View::Quick || view_ == View::ExpandedMedia) {  // sürgü zaten gösteriyor
         StartAnimation();
         return;
     }
@@ -2508,13 +2554,27 @@ void Island::OnLookTimer() {
         dropArmed_ = arm;
         Update();
     }
+    // Fare sadece üstünden geçiyorsa (sekmelere gidiyorsa) açılma; durup bekleyince aç.
+    bool compact = view_ == View::Idle || view_ == View::Media || view_ == View::Timer;
+    if (over && !hover_ && moved) lastMoveOver_ = now;
+    float ghostWant = (over && !hover_ && compact && now - lastMoveOver_ < 0.25) ? 0.2f : 1.f;
+    if (ghost_.target != ghostWant) {
+        ghost_.target = ghostWant;
+        StartAnimation();
+    }
     if (!hover_) {
         if (over && !buttonDown) {
+            float mx = static_cast<float>(pt.x - hoverAnchor_.x), my = static_cast<float>(pt.y - hoverAnchor_.y);
+            bool drifted = mx * mx + my * my > (7.f * scale_) * (7.f * scale_);
             if (hoverSince_ == 0) {
                 hoverSince_ = now;
+                hoverAnchor_ = pt;
                 if (eyes_.CurrentMood() == Eyes::Mood::Normal || eyes_.CurrentMood() == Eyes::Mood::Sleepy)
                     eyes_.SetMood(Eyes::Mood::Surprised, now, 0.45);
-            } else if (now - hoverSince_ >= 0.45) {
+            } else if (drifted) {
+                hoverSince_ = now;  // hâlâ hareket ediyor: beklemeyi baştan say
+                hoverAnchor_ = pt;
+            } else if (now - hoverSince_ >= (slim_ ? 0.55 : 0.45)) {
                 SetHover(true);
                 if (!snapshot_.hasSession) eyes_.SetMood(Eyes::Mood::Cute, now, 1.2);  // "merhaba!"
                 hoverSince_ = 0;
@@ -2720,6 +2780,17 @@ LRESULT Island::WndProc(UINT msg, WPARAM wp, LPARAM lp) {
         return MA_NOACTIVATE;  // tıklayınca açık uygulamanın odağını çalma
 
     case WM_LBUTTONDOWN:
+        if (view_ == View::ExpandedMedia) {
+            float x = GET_X_LPARAM(lp) / scale_ - kPad, y = GET_Y_LPARAM(lp) / scale_;
+            int hit = MediaHit(x, y);
+            if (hit == 20 || hit == 21) {
+                sliderDrag_ = hit == 20 ? 2 : 3;
+                seekPreview_ = snapshot_.CurrentPosition();
+                SetCapture(hwnd_);
+                MediaSlider(sliderDrag_, x);
+                return 0;
+            }
+        }
         if (view_ == View::Quick) {
             float x = GET_X_LPARAM(lp) / scale_ - kPad, y = GET_Y_LPARAM(lp) / scale_;
             int hit = QuickHit(x, y);
@@ -2774,6 +2845,13 @@ LRESULT Island::WndProc(UINT msg, WPARAM wp, LPARAM lp) {
 
     case WM_LBUTTONUP:
         if (sliderDrag_ >= 0) {
+            if (sliderDrag_ == 2 && snapshot_.durationSec > 0) {
+                // Bırakınca şarkı oraya sarılır; yeni konum gelene kadar çubuk yerinde dursun.
+                media_.Seek(seekPreview_);
+                snapshot_.positionSec = seekPreview_;
+                snapshot_.stamp = std::chrono::steady_clock::now();
+                eyes_.SetMood(Eyes::Mood::Wink, Now(), 0.6);
+            }
             sliderDrag_ = -1;
             ReleaseCapture();
             StartAnimation();
@@ -2807,6 +2885,7 @@ LRESULT Island::WndProc(UINT msg, WPARAM wp, LPARAM lp) {
         trackingLeave_ = false;
         hoverBtn_ = -1;
         hoverTool_ = -1;
+        mediaHover_ = -1;
         for (auto& g : btnGlow_) g.target = 0.f;
         for (auto& g : toolGlow_) g.target = 0.f;
         if (pressBtn_ >= 0) btnScale_[pressBtn_].target = 1.f;
@@ -2913,6 +2992,7 @@ LRESULT Island::WndProc(UINT msg, WPARAM wp, LPARAM lp) {
             break;
         case kTimerTick: {
             CheckFullscreen();
+            if (CheckSlim()) Update();
             OnCompanionTick();
             OnPrivacyTick();
             CheckReminders();
@@ -3016,6 +3096,24 @@ LRESULT Island::WndProc(UINT msg, WPARAM wp, LPARAM lp) {
                 return 0;
             }
             if (view_ == View::Note || view_ == View::Ink) return 0;
+            if (view_ == View::ExpandedMedia) {
+                int hit = MediaHit(x, y);
+                if (hit == 20 && snapshot_.durationSec > 0) {  // teker: 5 sn ileri / geri
+                    double p = std::clamp(snapshot_.CurrentPosition() + notches * 5.0, 0.0, snapshot_.durationSec);
+                    media_.Seek(p);
+                    snapshot_.positionSec = p;
+                    snapshot_.stamp = std::chrono::steady_clock::now();
+                    StartAnimation();
+                    return 0;
+                }
+                if (hit == 21 && volume_ >= 0) {
+                    volume_ = std::clamp(volume_ + notches * 2, 0, 100);
+                    muted_ = false;
+                    VolumeWatch::Set(volume_);
+                    StartAnimation();
+                    return 0;
+                }
+            }
         }
         int step = (GET_KEYSTATE_WPARAM(wp) & MK_CONTROL) ? 5 : 1;
         companion_.AdjustPending(notches * step, Now());
