@@ -12,6 +12,7 @@ constexpr float kTopMargin = 4.f;
 // Island.cpp ve Extras.cpp'nin ortak zamanlayıcıları (diğerleri Island.cpp'de, 2-8)
 constexpr UINT_PTR kTimerLyrics = 9;
 constexpr UINT_PTR kTimerSleepRestore = 10;
+constexpr UINT_PTR kTimerWeather = 11;
 // Gölge için hapın çevresinde bırakılan boşluk (yanlar ve alt).
 constexpr float kPad = 16.f, kPadBottom = 20.f;
 constexpr float kTransition = 0.38f;  // görünüm geçişi süresi (sn)
@@ -49,6 +50,7 @@ constexpr int kToolCols = 6;
 constexpr Size3 kNote{380, 160, 28};
 constexpr Size3 kInk{300, 44, 22};
 constexpr Size3 kQuick{380, 196, 36};
+constexpr Size3 kHome{400, 132, 36};
 
 // Segoe Fluent Icons
 constexpr wchar_t kGlyphPrev[] = L"\xE892";

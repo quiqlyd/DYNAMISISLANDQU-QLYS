@@ -21,6 +21,8 @@ add_executable(DynamisIsland WIN32
     src/Net.cpp
     src/Lyrics.cpp
     src/Extras.cpp
+    src/Home.cpp
+    src/Weather.cpp
     src/Island.h
     src/MediaService.h
     src/Spring.h
@@ -34,6 +36,7 @@ add_executable(DynamisIsland WIN32
     src/IslandUi.h
     src/Net.h
     src/Lyrics.h
+    src/Weather.h
 )
 
 set(APP_VERSION 0 CACHE STRING "Sürüm numarası (CI çalıştırma numarası)")
