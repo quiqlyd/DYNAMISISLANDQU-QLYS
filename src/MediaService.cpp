@@ -17,12 +17,13 @@ double MediaSnapshot::CurrentPosition() const {
     return pos < 0 ? 0 : pos;
 }
 
-void MediaService::Start(HWND notifyWindow, IWICImagingFactory* wic) {
+void MediaService::Start(HWND notifyWindow) {
     hwnd_ = notifyWindow;
-    wic_ = wic;
-    // Yönetici arka planda alınır, açılış gecikmesin.
+    // Yönetici arka planda alınır, açılış gecikmesin. Kapak resimleri bu MTA tarafında
+    // çözüldüğü için WIC fabrikası da burada, kendi dairesinde oluşturulur.
     std::thread([this] {
         winrt::init_apartment(winrt::apartment_type::multi_threaded);
+        CoCreateInstance(CLSID_WICImagingFactory, nullptr, CLSCTX_INPROC_SERVER, IID_PPV_ARGS(&wic_));
         try {
             manager_ = Manager::RequestAsync().get();
             sessionChangedRevoker_ = manager_.CurrentSessionChanged(
@@ -139,6 +140,7 @@ ComPtr<IWICBitmapSource> MediaService::LoadThumbnail(IRandomAccessStreamReferenc
                 static_cast<::IUnknown*>(winrt::get_abi(stream)), IID_PPV_ARGS(&istream))))
             return nullptr;
 
+        if (!wic_) return nullptr;
         ComPtr<IWICBitmapDecoder> decoder;
         if (FAILED(wic_->CreateDecoderFromStream(istream.Get(), nullptr,
                                                  WICDecodeMetadataCacheOnLoad, &decoder)))

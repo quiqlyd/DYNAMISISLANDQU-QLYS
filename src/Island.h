@@ -11,6 +11,7 @@
 #include "Eyes.h"
 #include "MediaService.h"
 #include "Spring.h"
+#include "Watchers.h"
 
 // Ekranın üst ortasında duran, şekil değiştiren siyah hap.
 // Katmanlı (layered) pencere + Direct2D: saydam kısımlar tıklamayı alttaki pencereye geçirir.
@@ -21,7 +22,8 @@ public:
 
 private:
     enum class View { Idle, Media, ExpandedMedia, ExpandedIdle, Alert, Timer };
-    enum class AlertKind { Charging, Unplugged, LowBattery, UpdateAvailable, Updating, UpToDate, UpdateFailed, TimerDone, FocusDone, BreakDone };
+    enum class AlertKind { Charging, Unplugged, LowBattery, UpdateAvailable, Updating, UpToDate, UpdateFailed, TimerDone, FocusDone, BreakDone,
+                           CpuBusy, MemoryFull, Offline, Online, Download };
 
     static LRESULT CALLBACK StaticWndProc(HWND, UINT, WPARAM, LPARAM);
     LRESULT WndProc(UINT msg, WPARAM wp, LPARAM lp);
@@ -40,6 +42,13 @@ private:
     void ApplyVisibility();
     void ToggleUserHidden();
     void OnPowerChanged(bool initial);
+    void OnHealthTick();
+    void OnPrivacyTick();
+    void OnClipboardUpdate();
+    void OnDownload(const std::wstring& path);
+    void OpenDownloadFolder();
+    void StartDownloadDrag();
+    bool IsDownloadAlert() const { return alertActive_ && alertKind_ == AlertKind::Download; }
 
     // Çizim
     bool EnsureResources();
@@ -51,6 +60,8 @@ private:
     void DrawExpandedIdle(float w, float h);
     void DrawAlert(float w, float h);
     void DrawTimer(float w, float h);
+    void DrawDownload(float w, float h);
+    void DrawPrivacyDots(float right, float cy);
     std::wstring TimerText() const;
     D2D1_COLOR_F TimerColor() const;
     void DrawArt(D2D1_RECT_F rect, float radius);
@@ -95,7 +106,6 @@ private:
     // Direct2D / DirectWrite
     Microsoft::WRL::ComPtr<ID2D1Factory> d2d_;
     Microsoft::WRL::ComPtr<IDWriteFactory> dwrite_;
-    Microsoft::WRL::ComPtr<IWICImagingFactory> wic_;
     Microsoft::WRL::ComPtr<ID2D1DCRenderTarget> rt_;
     Microsoft::WRL::ComPtr<ID2D1SolidColorBrush> brush_;
     Microsoft::WRL::ComPtr<ID2D1Bitmap> artBitmap_;
@@ -141,4 +151,23 @@ private:
     // Guti'nin beyni: zamanlayıcı, odak, mola, dostluk
     Companion companion_;
     double reunionAt_ = 0;
+
+    // Guti'nin duyuları
+    SystemHealth health_;
+    PrivacyWatch privacy_;
+    int healthTick_ = 0;
+    int cpuHotSamples_ = 0, ramHotSamples_ = 0, offlineSamples_ = 0;
+    bool cpuHot_ = false;
+    bool offlineShown_ = false;
+    double lastCpuAlert_ = -1e9, lastRamAlert_ = -1e9;
+    double lastShot_ = -1e9;
+    double lastSweat_ = -1e9;
+    std::wstring downloadPath_;
+    // Müziğe gerçek ritimle dans
+    AudioMeter meter_;
+    float level_ = -1.f;     // ekranda gösterilen seviye (hızlı yükselir, yavaş iner)
+    float avgLevel_ = 0.f;   // uzun ortalama: vuruşu bunun üstündeki sıçrama belirler
+    float beatPulse_ = 0.f;  // vuruştan sonra sönen zıplama
+    double lastBeat_ = 0;
+    double swallowUpUntil_ = 0;  // indirme kartına basınca gelen bırakma tıklamasını yut
 };

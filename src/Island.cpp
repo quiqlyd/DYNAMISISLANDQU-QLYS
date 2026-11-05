@@ -7,7 +7,9 @@
 #include <windowsx.h>
 #include <shellscalingapi.h>
 #include <shlobj.h>
+#include <shlguid.h>
 #include <algorithm>
+#include <memory>
 #include <cmath>
 #include <cstdio>
 #include <string>
@@ -50,6 +52,7 @@ constexpr Size3 kExpandedMedia{400, 164, 40};
 constexpr Size3 kExpandedIdle{320, 96, 36};
 constexpr Size3 kAlert{300, 40, 20};
 constexpr Size3 kTimer{128, 24, 12};
+constexpr Size3 kDownload{340, 46, 23};
 
 // Segoe Fluent Icons
 constexpr wchar_t kGlyphPrev[] = L"\xE892";
@@ -62,6 +65,9 @@ constexpr wchar_t kGlyphSync[] = L"\xE895";
 constexpr wchar_t kGlyphCheck[] = L"\xE73E";
 constexpr wchar_t kGlyphError[] = L"\xE783";
 constexpr wchar_t kGlyphTimer[] = L"\xE916";
+constexpr wchar_t kGlyphDownload[] = L"\xE896";
+constexpr wchar_t kGlyphWarning[] = L"\xE7BA";
+constexpr wchar_t kGlyphGlobe[] = L"\xE774";
 
 constexpr wchar_t kRunKey[] = L"Software\\Microsoft\\Windows\\CurrentVersion\\Run";
 constexpr wchar_t kRunValue[] = L"DynamisIsland";
@@ -163,9 +169,6 @@ bool Island::Create(HINSTANCE instance) {
     if (FAILED(DWriteCreateFactory(DWRITE_FACTORY_TYPE_SHARED, __uuidof(IDWriteFactory),
                                    reinterpret_cast<IUnknown**>(dwrite_.GetAddressOf()))))
         return false;
-    if (FAILED(CoCreateInstance(CLSID_WICImagingFactory, nullptr, CLSCTX_INPROC_SERVER,
-                                IID_PPV_ARGS(&wic_))))
-        return false;
 
     WNDCLASSEXW wc{sizeof(wc)};
     wc.lpfnWndProc = StaticWndProc;
@@ -192,8 +195,12 @@ bool Island::Create(HINSTANCE instance) {
     height_.Snap(kIdle.h);
     radius_.Snap(kIdle.r);
 
-    media_.Start(hwnd_, wic_.Get());
+    media_.Start(hwnd_);
     OnPowerChanged(true);
+    health_.Sample();
+    privacy_.Start();
+    DownloadWatch::Start(hwnd_);
+    AddClipboardFormatListener(hwnd_);  // ekran görüntüsü alınınca göz kırpsın
     Sounds::SetEnabled(ReadSetting(L"Sounds", 1) != 0);
     companion_.Load();
     eyes_.SetAffection(companion_.Affection());
@@ -286,7 +293,7 @@ void Island::SetTargets(View v) {
     case View::Media: s = kMedia; break;
     case View::ExpandedMedia: s = kExpandedMedia; break;
     case View::ExpandedIdle: s = kExpandedIdle; break;
-    case View::Alert: s = kAlert; break;
+    case View::Alert: s = IsDownloadAlert() ? kDownload : kAlert; break;
     case View::Timer: s = kTimer; break;
     }
     width_.target = s.w;
@@ -299,14 +306,15 @@ void Island::Update() {
     if (v != view_) {
         view_ = v;
         contentAlpha_ = 0.f;
-        SetTargets(v);
-        // Küçük hâlde tıklamalar alttaki pencereye (ör. tarayıcı sekmeleri) geçer.
-        bool interactive = v == View::ExpandedMedia || v == View::ExpandedIdle;
-        LONG_PTR ex = GetWindowLongPtrW(hwnd_, GWL_EXSTYLE);
-        LONG_PTR want = interactive ? (ex & ~static_cast<LONG_PTR>(WS_EX_TRANSPARENT))
-                                    : (ex | WS_EX_TRANSPARENT);
-        if (want != ex) SetWindowLongPtrW(hwnd_, GWL_EXSTYLE, want);
     }
+    SetTargets(v);
+    // Küçük hâlde tıklamalar alttaki pencereye (ör. tarayıcı sekmeleri) geçer.
+    // İndirme kartı ise tıklanır ve sürüklenir.
+    bool interactive = v == View::ExpandedMedia || v == View::ExpandedIdle || IsDownloadAlert();
+    LONG_PTR ex = GetWindowLongPtrW(hwnd_, GWL_EXSTYLE);
+    LONG_PTR want = interactive ? (ex & ~static_cast<LONG_PTR>(WS_EX_TRANSPARENT))
+                                : (ex | WS_EX_TRANSPARENT);
+    if (want != ex) SetWindowLongPtrW(hwnd_, GWL_EXSTYLE, want);
     StartAnimation();
 }
 
@@ -332,6 +340,25 @@ void Island::OnAnimationTick() {
     lastTick_ = now;
     dt = std::clamp(dt, 0.001f, 0.05f);
     time_ += dt;
+
+    // Müzik çalarken hoparlörün sesine bakar: çubuklar gerçek sesle oynar, vuruşta Guti zıplar.
+    if (NeedsContinuousFrames()) {
+        float peak = meter_.Peak(time_);
+        if (peak >= 0) {
+            if (level_ < 0) level_ = 0;
+            level_ = std::max(peak, level_ - dt * 2.2f);
+            float k = std::min(1.f, dt * 1.5f);
+            avgLevel_ += (peak - avgLevel_) * k;
+            if (peak > 0.06f && peak > avgLevel_ * 1.45f && time_ - lastBeat_ > 0.26) {
+                lastBeat_ = time_;
+                beatPulse_ = 1.f;
+                height_.velocity += view_ == View::Media ? 14.f : 9.f;
+            }
+        } else {
+            level_ = -1.f;
+        }
+    }
+    beatPulse_ = std::max(0.f, beatPulse_ - dt * 5.f);
 
     bool moving = false;
     // Küçük adımlarla entegre et: yay kararlı kalsın.
@@ -397,6 +424,23 @@ void Island::ShowAlert(AlertKind kind, int value, UINT durationMs) {
         eyes_.SetMood(Eyes::Mood::Happy, now, 2.0);
         Sounds::Play(Sounds::Sound::TimerDone);
         height_.velocity += 100.f;
+        break;
+    case AlertKind::CpuBusy:
+        eyes_.SetMood(Eyes::Mood::Sweaty, now, 3.5);  // "of, çok sıcak!"
+        lastSweat_ = now;
+        break;
+    case AlertKind::MemoryFull:
+        MoodWithSound(Eyes::Mood::Dizzy, 2.5);  // kafası doldu
+        shake_.velocity += 200.f;
+        break;
+    case AlertKind::Offline: MoodWithSound(Eyes::Mood::Sad, 3.0); break;
+    case AlertKind::Online:
+        MoodWithSound(Eyes::Mood::Happy, 2.0);
+        height_.velocity += 90.f;
+        break;
+    case AlertKind::Download:
+        MoodWithSound(Eyes::Mood::Happy, 2.0);  // "getirdim!"
+        height_.velocity += 110.f;
         break;
     default: break;
     }
@@ -583,6 +627,15 @@ void Island::Render() {
     case View::Alert: DrawAlert(w, h); break;
     case View::Timer: DrawTimer(w, h); break;
     }
+    // Kamera / mikrofon açıkken küçük renkli nokta (yeşil kamera, turuncu mikrofon).
+    switch (view_) {
+    case View::Idle: DrawPrivacyDots(w - 9.f, h / 2); break;
+    case View::Media: DrawPrivacyDots(w - 44.f, h / 2); break;
+    case View::Timer: DrawPrivacyDots(w - 6.5f, 6.5f); break;
+    case View::ExpandedIdle:
+    case View::ExpandedMedia: DrawPrivacyDots(w / 2 + 6.f, 9.f); break;
+    case View::Alert: break;
+    }
     if (layer && clip) rt_->PopLayer();
 
     HRESULT hr = rt_->EndDraw();
@@ -642,6 +695,11 @@ void Island::DrawBars(float right, float centerY, float maxHeight, float barWidt
             double v = std::sin(time_ * (5.0 + i * 1.7) + i * 1.3) *
                        std::sin(time_ * (2.3 + i * 0.9) + i);
             t = 0.3f + 0.7f * static_cast<float>(std::fabs(v));
+            if (level_ >= 0) {
+                // Gerçek ses seviyesi; her çubuğa biraz farklı salınım katılır.
+                float lv = std::min(1.f, level_ * 1.5f);
+                t = std::clamp(lv * (0.55f + 0.45f * static_cast<float>(std::fabs(v))), 0.15f, 1.f);
+            }
         }
         float bh = std::max(barWidth, maxHeight * t);
         D2D1_ROUNDED_RECT bar{D2D1::RectF(x, centerY - bh / 2, x + barWidth, centerY + bh / 2),
@@ -661,7 +719,11 @@ void Island::DrawCompactMedia(float w, float h) {
     DrawArt(D2D1::RectF(pad, pad, pad + side, pad + side), 7.f);
     DrawBars(w - 14.f, h / 2, 14.f, 3.f);
     // Müzik çalarken gözler ritimle hafifçe sallanır.
-    float bob = snapshot_.playing ? static_cast<float>(std::sin(time_ * 7.0)) * 1.6f : 0.f;
+    float bob = 0.f;
+    if (snapshot_.playing) {
+        bob = level_ >= 0 ? -beatPulse_ * 2.4f  // vuruşta hop
+                          : static_cast<float>(std::sin(time_ * 7.0)) * 1.6f;
+    }
     eyes_.Draw(rt_.Get(), d2d_.Get(), brush_.Get(), roundStroke_.Get(), w / 2, h / 2, 0.85f, bob);
 }
 
@@ -784,7 +846,32 @@ void Island::DrawTimer(float w, float h) {
     }
 }
 
+void Island::DrawPrivacyDots(float right, float cy) {
+    float x = right;
+    if (privacy_.Camera()) {
+        brush_->SetColor(kGreen);
+        rt_->FillEllipse(D2D1::Ellipse(D2D1::Point2F(x, cy), 2.6f, 2.6f), brush_.Get());
+        x -= 7.f;
+    }
+    if (privacy_.Mic()) {
+        brush_->SetColor(kOrange);
+        rt_->FillEllipse(D2D1::Ellipse(D2D1::Point2F(x, cy), 2.6f, 2.6f), brush_.Get());
+    }
+}
+
+void Island::DrawDownload(float w, float h) {
+    Text(kGlyphDownload, fIcon_.Get(), D2D1::RectF(12, 0, 42, h), kGreen);
+    size_t slash = downloadPath_.find_last_of(L'\\');
+    std::wstring name = slash == std::wstring::npos ? downloadPath_ : downloadPath_.substr(slash + 1);
+    Text(L"İndirme bitti · sürükle ya da tıkla", fSmall_.Get(), D2D1::RectF(48, 4, w - 18, 20), kGray);
+    Text(name.c_str(), fAlert_.Get(), D2D1::RectF(48, 18, w - 18, h - 4), kWhite);
+}
+
 void Island::DrawAlert(float w, float h) {
+    if (alertKind_ == AlertKind::Download) {
+        DrawDownload(w, h);
+        return;
+    }
     if (alertKind_ >= AlertKind::UpdateAvailable) {
         const wchar_t* glyph = kGlyphSync;
         const wchar_t* label = L"";
@@ -797,16 +884,23 @@ void Island::DrawAlert(float w, float h) {
         case AlertKind::TimerDone: label = L"Süre doldu!"; glyph = kGlyphTimer; color = kWhite; break;
         case AlertKind::FocusDone: label = L"Odak bitti, mola zamanı"; glyph = kGlyphTimer; color = kGreen; break;
         case AlertKind::BreakDone: label = L"Mola bitti, hadi devam"; glyph = kGlyphTimer; color = kOrange; break;
+        case AlertKind::CpuBusy: label = L"İşlemci çok yoğun"; glyph = kGlyphWarning; color = kOrange; break;
+        case AlertKind::MemoryFull: label = L"Bellek dolmak üzere"; glyph = kGlyphWarning; color = kRed; break;
+        case AlertKind::Offline: label = L"İnternet gitti"; glyph = kGlyphGlobe; color = kRed; break;
+        case AlertKind::Online: label = L"İnternet geri geldi"; glyph = kGlyphGlobe; color = kGreen; break;
         default: break;
         }
         Text(glyph, fIcon_.Get(), D2D1::RectF(12, 0, 40, h), color);
         Text(label, fAlert_.Get(), D2D1::RectF(46, 0, w - 70, h), kWhite);
         wchar_t buf[16];
+        bool percent = alertKind_ == AlertKind::CpuBusy || alertKind_ == AlertKind::MemoryFull;
         if (alertKind_ == AlertKind::UpdateFailed)
             swprintf_s(buf, L"hata %d", alertValue_);
+        else if (percent)
+            swprintf_s(buf, L"%%%d", alertValue_);
         else
             swprintf_s(buf, L"v%d", alertValue_);
-        bool showValue = alertValue_ > 0 && alertKind_ <= AlertKind::UpdateFailed;
+        bool showValue = alertValue_ > 0 && (alertKind_ <= AlertKind::UpdateFailed || percent);
         if (showValue) Text(buf, fAlertRight_.Get(), D2D1::RectF(w - 80, 0, w - 18, h), color);
         return;
     }
@@ -819,6 +913,7 @@ void Island::DrawAlert(float w, float h) {
     case AlertKind::Charging: label = L"Şarj oluyor"; color = kGreen; break;
     case AlertKind::Unplugged: label = L"Şarj kesildi"; color = kWhite; break;
     case AlertKind::LowBattery: label = L"Pil azaldı"; color = kRed; break;
+    default: break;
     }
     if (alertKind_ == AlertKind::Charging)
         Text(kGlyphBolt, fIcon_.Get(), D2D1::RectF(12, 0, 40, h), color);
@@ -960,6 +1055,127 @@ void Island::OnCompanionTick() {
         StartAnimation();
     }
     if (TargetView() != view_) Update();
+}
+
+// ---------------------------------------------------------------------------
+// Guti'nin duyuları: bilgisayar sağlığı, kamera/mikrofon, ekran görüntüsü, indirmeler
+// ---------------------------------------------------------------------------
+
+void Island::OnHealthTick() {
+    health_.Sample();
+    double now = Now();
+    bool quiet = fullscreen_ || userHidden_;  // oyun oynarken araya girme
+
+    // İşlemci: 10 sn boyunca %85 üstü -> terler. %60 altına inince rahatlar.
+    float cpu = health_.Cpu();
+    if (cpu > 0.85f) ++cpuHotSamples_;
+    else if (cpu < 0.60f) { cpuHotSamples_ = 0; cpuHot_ = false; }
+    if (!cpuHot_ && cpuHotSamples_ >= 5) {
+        cpuHot_ = true;
+        if (!quiet && now - lastCpuAlert_ > 600) {
+            lastCpuAlert_ = now;
+            ShowAlert(AlertKind::CpuBusy, static_cast<int>(cpu * 100 + 0.5f), 3500);
+        }
+    }
+    // Yoğunluk sürerse arada bir alnını siler (sürekli animasyon yapıp yükü artırmadan).
+    if (cpuHot_ && !quiet && now - lastSweat_ > 30 && eyes_.CurrentMood() == Eyes::Mood::Normal) {
+        eyes_.SetMood(Eyes::Mood::Sweaty, now, 3.0);
+        lastSweat_ = now;
+        StartAnimation();
+    }
+
+    // Bellek: %92 üstü 10 sn -> başı döner.
+    float ram = health_.Ram();
+    ramHotSamples_ = ram >= 0.92f ? ramHotSamples_ + 1 : 0;
+    if (ramHotSamples_ == 5 && !quiet && now - lastRamAlert_ > 600) {
+        lastRamAlert_ = now;
+        ShowAlert(AlertKind::MemoryFull, static_cast<int>(ram * 100 + 0.5f), 3500);
+    }
+
+    // İnternet: iki ölçüm üst üste yoksa üzülür, gelince sevinir.
+    switch (health_.Network()) {
+    case SystemHealth::Net::Offline:
+        if (++offlineSamples_ == 2 && !offlineShown_) {
+            offlineShown_ = true;
+            if (!quiet) ShowAlert(AlertKind::Offline, 0, 3500);
+        }
+        break;
+    case SystemHealth::Net::Online:
+        offlineSamples_ = 0;
+        if (offlineShown_) {
+            offlineShown_ = false;
+            if (!quiet) ShowAlert(AlertKind::Online, 0, 2500);
+        }
+        break;
+    case SystemHealth::Net::Unknown: break;
+    }
+}
+
+void Island::OnPrivacyTick() {
+    bool cam = privacy_.Camera(), mic = privacy_.Mic();
+    if (!privacy_.Poll()) return;
+    if ((privacy_.Camera() && !cam) || (privacy_.Mic() && !mic)) {
+        // Biri kamerayı / mikrofonu açtı: Guti merakla bakar.
+        eyes_.SetMood(Eyes::Mood::Curious, Now(), 1.6);
+        lastActivity_ = Now();
+    }
+    StartAnimation();
+}
+
+void Island::OnClipboardUpdate() {
+    // Ekran görüntüsü: panoya sadece resim gelir (tarayıcıdan kopyalanan resimde HTML de olur).
+    static const UINT html = RegisterClipboardFormatW(L"HTML Format");
+    if (!IsClipboardFormatAvailable(CF_DIB) && !IsClipboardFormatAvailable(CF_BITMAP)) return;
+    if (IsClipboardFormatAvailable(html) || IsClipboardFormatAvailable(CF_HDROP)) return;
+    double now = Now();
+    if (now - lastShot_ < 2.0) return;
+    lastShot_ = now;
+    lastActivity_ = now;
+    eyes_.SetMood(Eyes::Mood::Wink, now, 1.2);  // "çektim!"
+    Sounds::Play(Sounds::Sound::Shutter);
+    height_.velocity += 70.f;
+    StartAnimation();
+}
+
+void Island::OnDownload(const std::wstring& path) {
+    downloadPath_ = path;
+    ShowAlert(AlertKind::Download, 0, 8000);
+}
+
+void Island::OpenDownloadFolder() {
+    if (downloadPath_.empty()) return;
+    if (PIDLIST_ABSOLUTE pidl = ILCreateFromPathW(downloadPath_.c_str())) {
+        AllowSetForegroundWindow(ASFW_ANY);
+        SHOpenFolderAndSelectItems(pidl, 0, nullptr, 0);
+        ILFree(pidl);
+    }
+    alertActive_ = false;
+    KillTimer(hwnd_, kTimerAlert);
+    eyes_.SetMood(Eyes::Mood::Happy, Now(), 1.2);
+    Update();
+}
+
+void Island::StartDownloadDrag() {
+    ComPtr<IShellItem> item;
+    ComPtr<IDataObject> data;
+    if (FAILED(SHCreateItemFromParsingName(downloadPath_.c_str(), nullptr, IID_PPV_ARGS(&item))) ||
+        FAILED(item->BindToHandler(nullptr, BHID_DataObject, IID_PPV_ARGS(&data)))) {
+        OpenDownloadFolder();  // dosya taşınmış olabilir
+        return;
+    }
+    KillTimer(hwnd_, kTimerAlert);  // sürüklerken kart kaybolmasın
+    eyes_.SetMood(Eyes::Mood::Surprised, Now(), 0.8);
+    StartAnimation();
+    DWORD effect = DROPEFFECT_NONE;
+    HRESULT hr = SHDoDragDrop(hwnd_, data.Get(), nullptr,
+                              DROPEFFECT_COPY | DROPEFFECT_MOVE | DROPEFFECT_LINK, &effect);
+    if (hr == DRAGDROP_S_DROP) {
+        alertActive_ = false;
+        MoodWithSound(Eyes::Mood::Happy, 1.4);  // teslim edildi
+    } else {
+        SetTimer(hwnd_, kTimerAlert, 3000, nullptr);
+    }
+    Update();
 }
 
 void Island::OnLookTimer() {
@@ -1164,9 +1380,34 @@ LRESULT Island::WndProc(UINT msg, WPARAM wp, LPARAM lp) {
     case WM_MOUSEACTIVATE:
         return MA_NOACTIVATE;  // tıklayınca açık uygulamanın odağını çalma
 
+    case WM_LBUTTONDOWN:
+        if (IsDownloadAlert()) {
+            // Basılı tutup çekersen dosya sürüklenir; sadece tıklarsan klasörde gösterilir.
+            POINT pt{GET_X_LPARAM(lp), GET_Y_LPARAM(lp)};
+            ClientToScreen(hwnd_, &pt);
+            swallowUpUntil_ = Now() + 1.0;
+            if (DragDetect(hwnd_, pt)) StartDownloadDrag();
+            else OpenDownloadFolder();
+        }
+        return 0;
+
     case WM_LBUTTONUP:
+        if (IsDownloadAlert() || Now() < swallowUpUntil_) {
+            swallowUpUntil_ = 0;
+            return 0;
+        }
         OnClick(GET_X_LPARAM(lp) / scale_, GET_Y_LPARAM(lp) / scale_);
         return 0;
+
+    case WM_CLIPBOARDUPDATE:
+        OnClipboardUpdate();
+        return 0;
+
+    case DownloadWatch::WM_DOWNLOAD_DONE: {
+        std::unique_ptr<std::wstring> path(reinterpret_cast<std::wstring*>(lp));
+        if (path) OnDownload(*path);
+        return 0;
+    }
 
     case WM_TIMER:
         switch (wp) {
@@ -1189,12 +1430,18 @@ LRESULT Island::WndProc(UINT msg, WPARAM wp, LPARAM lp) {
             break;
         case kTimerAlert:
             KillTimer(hwnd_, kTimerAlert);
+            if (IsDownloadAlert() && hover_) {
+                SetTimer(hwnd_, kTimerAlert, 1500, nullptr);  // üstündeyken bekle
+                break;
+            }
             alertActive_ = false;
             Update();
             break;
         case kTimerTick: {
             CheckFullscreen();
             OnCompanionTick();
+            OnPrivacyTick();
+            if (++healthTick_ % 2 == 0) OnHealthTick();
             if (!hidden_) {
                 SetWindowPos(hwnd_, HWND_TOPMOST, 0, 0, 0, 0,
                              SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE | SWP_NOOWNERZORDER);
@@ -1313,6 +1560,7 @@ LRESULT Island::WndProc(UINT msg, WPARAM wp, LPARAM lp) {
 
     case WM_DESTROY: {
         companion_.Save();
+        RemoveClipboardFormatListener(hwnd_);
         UnregisterHotKey(hwnd_, kHotkeyToggle);
         NOTIFYICONDATAW nid{sizeof(nid)};
         nid.hWnd = hwnd_;
