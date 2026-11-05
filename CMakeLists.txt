@@ -24,6 +24,7 @@ add_executable(DynamisIsland WIN32
     src/Home.cpp
     src/Diary.cpp
     src/Notify.cpp
+    src/NotifyUia.cpp
     src/Weather.cpp
     src/Island.h
     src/MediaService.h
