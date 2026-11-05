@@ -18,6 +18,15 @@ Windows 11 için Dinamik Ada (ve ileride modern taskbar). C++ ve saf Win32 + Dir
 - Kamera veya mikrofon açıkken adada küçük nokta (yeşil kamera, turuncu mikrofon); Guti merakla bakar
 - Ekran görüntüsü alınca göz kırpar ve minik deklanşör sesi çıkarır
 - İndirme bitince kart çıkar: tıkla klasörde göster, ya da dosyayı adadan sürükleyip istediğin yere bırak
+- **Yazınca anlayan ada** (Ctrl+Alt+Boşluk ya da açık adada saate tıkla):
+  - `12*4+7`, `200*18%`, `sqrt(16)` → hesaplar, Enter sonucu kopyalar
+  - `10 inç cm`, `100 f c`, `5 km mil`, `2 gb mb` → birim çevirir
+  - `30 dk çamaşır`, `çamaşır 1 saat sonra`, `15:30 toplantı` → hatırlatıcı kurar (kapatıp açsan da kalır)
+  - Boşken son 5 kopyaladığın şey listelenir (↑ ↓ / teker, Enter kopyalar). Pano geçmişi sadece bellekte tutulur, şifre yöneticilerinin "geçmişe ekleme" işaretine uyulur
+- **Ekran görüntüsü** (Ctrl+Alt+S): önizleme kartı çıkar, tıkla aç ya da sürükleyip bırak
+- **Dosya rafı:** dosyayı adaya sürükle bırak, Guti tutar. Adayı açınca altta görünür; oradan istediğin yere sürükle
+- **Renk seçici** (Ctrl+Alt+C): ekranda bir yere tıkla, renk kodu (#RRGGBB) kopyalanır; Guti'nin gözleri o renge bürünür
+- Ses düzeyi göstergesi (Ayarlar'dan kapatılabilir) ve Bluetooth kulaklık bağlanınca pil yüzdesi
 - Sağ alttaki tepsi simgesine sağ tık: **Windows ile başlat** ve **Çıkış**
 
 ## İndirme
