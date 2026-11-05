@@ -1,5 +1,7 @@
 #include "Island.h"
+#include "IslandUi.h"
 #include "Sounds.h"
+#include "Sys.h"
 #include "Updater.h"
 
 #include <objbase.h>
@@ -21,6 +23,7 @@
 #pragma comment(lib, "shcore.lib")
 
 using Microsoft::WRL::ComPtr;
+using namespace isl;
 
 namespace {
 
@@ -35,6 +38,9 @@ constexpr int kHotkeyToggle = 1;
 constexpr int kHotkeyCommand = 2;
 constexpr int kHotkeyShot = 3;
 constexpr int kHotkeyPicker = 4;
+constexpr int kHotkeyOcr = 5;
+constexpr int kHotkeyNote = 6;
+constexpr int kHotkeyInk = 7;
 
 constexpr UINT kTrayMsg = WM_APP + 2;
 constexpr UINT kFrameMsg = WM_APP + 8;  // kare saati: bir sonraki kareyi çiz
@@ -51,67 +57,10 @@ constexpr UINT kCmdShot = 108;
 constexpr UINT kCmdClearShelf = 109;
 constexpr UINT kCmdPicker = 110;
 constexpr UINT kCmdVolumeOsd = 111;
-constexpr wchar_t kSettingsKey[] = L"Software\\DynamisIsland";
-
-constexpr float kTopMargin = 4.f;
-// Gölge için hapın çevresinde bırakılan boşluk (yanlar ve alt).
-constexpr float kPad = 16.f, kPadBottom = 20.f;
-constexpr float kTransition = 0.38f;  // görünüm geçişi süresi (sn)
-
-float EaseOut(float t) {
-    t = std::clamp(t, 0.f, 1.f);
-    float u = 1 - t;
-    return 1 - u * u * u;
-}
-constexpr float kMaxW = 420.f, kMaxH = 230.f;
-
-// Görünüm boyutları (DIP)
-struct Size3 { float w, h, r; };
-constexpr Size3 kIdle{78, 22, 11};
-constexpr Size3 kMedia{236, 34, 17};
-constexpr Size3 kExpandedMedia{400, 164, 40};
-constexpr Size3 kExpandedIdle{320, 96, 36};
-constexpr Size3 kAlert{300, 40, 20};
-constexpr Size3 kTimer{128, 24, 12};
-constexpr Size3 kDownload{340, 46, 23};
-constexpr Size3 kShot{360, 92, 28};
-constexpr Size3 kDrop{260, 46, 23};
-constexpr Size3 kPicker{220, 40, 20};
-constexpr float kShelfH = 58.f, kShelfCell = 58.f;
-constexpr int kShelfMax = 8, kShelfShown = 5;
-constexpr float kCommandW = 420.f, kCommandRow = 26.f, kCommandBar = 48.f;
-
-// Segoe Fluent Icons
-constexpr wchar_t kGlyphPrev[] = L"\xE892";
-constexpr wchar_t kGlyphNext[] = L"\xE893";
-constexpr wchar_t kGlyphPlay[] = L"\xE768";
-constexpr wchar_t kGlyphPause[] = L"\xE769";
-constexpr wchar_t kGlyphMusic[] = L"\xE8D6";
-constexpr wchar_t kGlyphBolt[] = L"\xE945";
-constexpr wchar_t kGlyphSync[] = L"\xE895";
-constexpr wchar_t kGlyphCheck[] = L"\xE73E";
-constexpr wchar_t kGlyphError[] = L"\xE783";
-constexpr wchar_t kGlyphTimer[] = L"\xE916";
-constexpr wchar_t kGlyphDownload[] = L"\xE896";
-constexpr wchar_t kGlyphWarning[] = L"\xE7BA";
-constexpr wchar_t kGlyphGlobe[] = L"\xE774";
-constexpr wchar_t kGlyphClose[] = L"\xE711";
-constexpr wchar_t kGlyphVolume[] = L"\xE767";
-constexpr wchar_t kGlyphMute[] = L"\xE74F";
-constexpr wchar_t kGlyphHeadphone[] = L"\xE7F6";
-
-constexpr wchar_t kRunKey[] = L"Software\\Microsoft\\Windows\\CurrentVersion\\Run";
-constexpr wchar_t kRunValue[] = L"DynamisIsland";
-
-D2D1_COLOR_F Rgba(float r, float g, float b, float a = 1.f) { return D2D1::ColorF(r, g, b, a); }
-D2D1_COLOR_F WithAlpha(D2D1_COLOR_F c, float a) { c.a *= a; return c; }
-
-const D2D1_COLOR_F kWhite = Rgba(1, 1, 1);
-const D2D1_COLOR_F kGray = Rgba(1, 1, 1, 0.55f);
-const D2D1_COLOR_F kGreen = Rgba(0.30f, 0.85f, 0.42f);
-const D2D1_COLOR_F kRed = Rgba(1.f, 0.30f, 0.27f);
-const D2D1_COLOR_F kOrange = Rgba(1.f, 0.62f, 0.25f);
-
+constexpr UINT kCmdOcr = 112;
+constexpr UINT kCmdNote = 113;
+constexpr UINT kCmdInk = 114;
+constexpr UINT kCmdCoffee = 115;
 std::wstring FormatClock(const SYSTEMTIME& st) {
     wchar_t buf[64];
     if (GetTimeFormatEx(LOCALE_NAME_USER_DEFAULT, TIME_NOSECONDS, &st, nullptr, buf, 64))
@@ -132,23 +81,6 @@ std::wstring FormatShortDate(const SYSTEMTIME& st) {
     if (GetDateFormatEx(LOCALE_NAME_USER_DEFAULT, 0, &st, L"ddd d MMM", buf, 64, nullptr))
         return buf;
     return L"";
-}
-
-DWORD ReadSetting(const wchar_t* name, DWORD fallback) {
-    DWORD value = fallback, size = sizeof(value);
-    if (RegGetValueW(HKEY_CURRENT_USER, kSettingsKey, name, RRF_RT_REG_DWORD, nullptr, &value,
-                     &size) != ERROR_SUCCESS)
-        return fallback;
-    return value;
-}
-
-void WriteSetting(const wchar_t* name, DWORD value) {
-    HKEY key;
-    if (RegCreateKeyExW(HKEY_CURRENT_USER, kSettingsKey, 0, nullptr, 0, KEY_WRITE, nullptr, &key,
-                        nullptr) == ERROR_SUCCESS) {
-        RegSetValueExW(key, name, 0, REG_DWORD, reinterpret_cast<const BYTE*>(&value), sizeof(value));
-        RegCloseKey(key);
-    }
 }
 
 ULONGLONG WallSeconds() {
@@ -309,6 +241,12 @@ bool Island::Create(HINSTANCE instance) {
     selY_.damping = 38.f;
     volBar_.stiffness = 260.f;
     volBar_.damping = 30.f;
+    pageX_.stiffness = 260.f;
+    pageX_.damping = 28.f;
+    for (auto& g : toolGlow_) {
+        g.stiffness = 300.f;
+        g.damping = 30.f;
+    }
     frameEvent_ = CreateEventW(nullptr, FALSE, FALSE, nullptr);
     std::thread([this] { FrameLoop(); }).detach();
     shake_.stiffness = 700.f;
@@ -341,6 +279,10 @@ bool Island::Create(HINSTANCE instance) {
     RegisterHotKey(hwnd_, kHotkeyCommand, MOD_CONTROL | MOD_ALT | MOD_NOREPEAT, VK_SPACE);
     RegisterHotKey(hwnd_, kHotkeyShot, MOD_CONTROL | MOD_ALT | MOD_NOREPEAT, 'S');
     RegisterHotKey(hwnd_, kHotkeyPicker, MOD_CONTROL | MOD_ALT | MOD_NOREPEAT, 'C');
+    // Ctrl+Alt = AltGr: Türkçe klavyede AltGr+T (₺) gibi işaretleri kapatmayan harfler seçildi.
+    RegisterHotKey(hwnd_, kHotkeyOcr, MOD_CONTROL | MOD_ALT | MOD_NOREPEAT, 'O');
+    RegisterHotKey(hwnd_, kHotkeyNote, MOD_CONTROL | MOD_ALT | MOD_NOREPEAT, 'N');
+    RegisterHotKey(hwnd_, kHotkeyInk, MOD_CONTROL | MOD_ALT | MOD_NOREPEAT, 'P');
     startedAt_ = Now();
     volumeOsd_ = ReadSetting(L"VolumeOsd", 1) != 0;
     VolumeWatch::Start(hwnd_);
@@ -362,6 +304,7 @@ bool Island::Create(HINSTANCE instance) {
         }
     }
     LoadReminders();
+    LoadNote();
     userHidden_ = ReadSetting(L"Hidden", 0) != 0;
     Update();
     Render();
@@ -423,11 +366,14 @@ void Island::UpdateDpi(UINT dpi) {
 
 Island::View Island::TargetView() const {
     if (commandMode_) return View::Command;
+    if (noteMode_) return View::Note;
+    if (ink_) return View::Ink;
     if (dropHover_) return View::Drop;
     if (picker_) return View::Picker;
     if (alertActive_) return View::Alert;
     bool timer = companion_.TimerActive() || companion_.Pending();
     if (hover_) {
+        if (quickOpen_) return View::Quick;
         if (companion_.Pending()) return View::ExpandedIdle;  // teker çevrilirken süreyi göster
         return snapshot_.hasSession ? View::ExpandedMedia : View::ExpandedIdle;
     }
@@ -449,14 +395,19 @@ void Island::SetTargets(View v) {
     case View::Command: s = {kCommandW, CommandHeight(), 24}; break;
     case View::Drop: s = kDrop; break;
     case View::Picker: s = kPicker; break;
+    case View::Note: s = kNote; break;
+    case View::Ink: s = kInk; break;
+    case View::Quick: s = kQuick; break;
     }
-    if ((v == View::ExpandedIdle || v == View::ExpandedMedia) && ShelfVisible()) s.h += kShelfH;
+    if (ToolsShown(v)) s.h += kToolsH;
+    if (ToolsShown(v) && ShelfVisible()) s.h += kShelfH;
     width_.target = s.w;
     height_.target = s.h;
     radius_.target = s.r;
 }
 
 void Island::Update() {
+    if (!hover_) quickOpen_ = false;  // ada kapanınca bir dahaki açılış araçlarla başlar
     View v = TargetView();
     if (v != view_) {
         // Eski içerik sönerken yenisi yerine otursun.
@@ -473,12 +424,13 @@ void Island::Update() {
     // Küçük hâlde tıklamalar alttaki pencereye (ör. tarayıcı sekmeleri) geçer.
     // İndirme kartı ise tıklanır ve sürüklenir.
     bool interactive = v == View::ExpandedMedia || v == View::ExpandedIdle || IsFileCard() ||
-                       v == View::Command || v == View::Drop || dropArmed_;
+                       v == View::Command || v == View::Drop || v == View::Note || v == View::Ink ||
+                       v == View::Quick || dropArmed_;
     LONG_PTR ex = GetWindowLongPtrW(hwnd_, GWL_EXSTYLE);
     LONG_PTR want = interactive ? (ex & ~static_cast<LONG_PTR>(WS_EX_TRANSPARENT))
                                 : (ex | WS_EX_TRANSPARENT);
     // Komut çubuğunda klavye odağı alabilmek için "etkinleşmez" bayrağı kalkar.
-    want = commandMode_ ? (want & ~static_cast<LONG_PTR>(WS_EX_NOACTIVATE)) : (want | WS_EX_NOACTIVATE);
+    want = Typing() ? (want & ~static_cast<LONG_PTR>(WS_EX_NOACTIVATE)) : (want | WS_EX_NOACTIVATE);
     if (want != ex) SetWindowLongPtrW(hwnd_, GWL_EXSTYLE, want);
     StartAnimation();
 }
@@ -567,6 +519,8 @@ void Island::OnAnimationTick() {
         }
         moving |= selY_.Step(step);
         moving |= volBar_.Step(step);
+        moving |= pageX_.Step(step);
+        for (auto& g : toolGlow_) moving |= g.Step(step);
     }
     if (trans_ < 1.f) {
         trans_ = std::min(1.f, trans_ + dt / kTransition);
@@ -649,6 +603,8 @@ void Island::ShowAlert(AlertKind kind, int value, UINT durationMs) {
         break;
     case AlertKind::HeadphonesLow: MoodWithSound(Eyes::Mood::Sad, 2.5); break;
     case AlertKind::Copied: MoodWithSound(Eyes::Mood::Happy, 1.4); break;
+    case AlertKind::Reading: eyes_.SetMood(Eyes::Mood::Curious, now, 15.0); break;  // bir gözünü kısıp okur
+    case AlertKind::OcrFailed: MoodWithSound(Eyes::Mood::Sad, 2.0); break;
     case AlertKind::Screenshot:
         eyes_.SetMood(Eyes::Mood::Wink, now, 1.2);  // "çektim!"
         Sounds::Play(Sounds::Sound::Shutter);
@@ -770,6 +726,12 @@ bool Island::EnsureResources() {
         fAlert_ = MakeFormat(f, ui, 13.5f, DWRITE_FONT_WEIGHT_SEMI_BOLD, aL, true);
         fAlertRight_ = MakeFormat(f, ui, 13.5f, DWRITE_FONT_WEIGHT_SEMI_BOLD, aT, false);
         fSmallCenter_ = MakeFormat(f, ui, 10.5f, DWRITE_FONT_WEIGHT_NORMAL, aC, true);
+        fAa_ = MakeFormat(f, ui, 17.f, DWRITE_FONT_WEIGHT_SEMI_BOLD, aC, false);
+        fNote_ = MakeFormat(f, ui, 13.5f, DWRITE_FONT_WEIGHT_NORMAL, aL, false);
+        if (fNote_) {
+            fNote_->SetWordWrapping(DWRITE_WORD_WRAPPING_WRAP);
+            fNote_->SetParagraphAlignment(DWRITE_PARAGRAPH_ALIGNMENT_NEAR);
+        }
         if (!fClock_) return false;
     }
     if (!roundStroke_) {
@@ -957,8 +919,22 @@ void Island::DrawView(View v, float w, float h) {
     case View::Command: DrawCommand(w, h); break;
     case View::Drop: DrawDrop(w, h); break;
     case View::Picker: DrawPicker(w, h); break;
+    case View::Note: DrawNote(w, h); break;
+    case View::Ink: DrawInkBar(w, h); break;
+    case View::Quick: DrawQuick(w, h); break;
     }
-    if ((v == View::ExpandedIdle || v == View::ExpandedMedia) && ShelfVisible()) DrawShelf(w);
+    if (ToolsShown(v)) DrawTools(v, w);
+    if (ToolsShown(v) && ShelfVisible()) DrawShelf(w);
+    if (v == View::Idle) {
+        // Kahve açıkken solda minik fincan; not varken Guti'nin yanında kalem.
+        if (coffee_) DrawCup(shelf_.empty() ? 6.f : 17.f, h / 2, 1.f);
+        if (!note_.empty()) {
+            float cx = w / 2, cy = h / 2;
+            brush_->SetColor(kOrange);
+            rt_->DrawLine(D2D1::Point2F(cx + 14.5f, cy + 5.f), D2D1::Point2F(cx + 19.5f, cy - 3.f), brush_.Get(), 1.8f,
+                          roundStroke_.Get());
+        }
+    }
     if (v == View::Idle && !shelf_.empty()) {
         // Rafta dosya var: solda minik kâğıt yığını
         brush_->SetColor(Rgba(1, 1, 1, 0.5f));
@@ -1236,10 +1212,20 @@ void Island::OnMouseMove(float x, float y) {
         TRACKMOUSEEVENT tme{sizeof(tme), TME_LEAVE, hwnd_, 0};
         trackingLeave_ = TrackMouseEvent(&tme) != FALSE;
     }
+    if (sliderDrag_ >= 0) {
+        QuickSlider(sliderDrag_, x);
+        return;
+    }
     int b = ButtonAt(x, y);
     if (b != hoverBtn_) {
         hoverBtn_ = b;
         for (int i = 0; i < 3; ++i) btnGlow_[i].target = i == b ? 1.f : 0.f;
+        StartAnimation();
+    }
+    int t = std::max(-1, ToolHit(x, y));
+    if (t != hoverTool_) {
+        hoverTool_ = t;
+        for (int i = 0; i < kToolCount; ++i) toolGlow_[i].target = i == t ? 1.f : 0.f;
         StartAnimation();
     }
     // Pano listesinde fareyle gezinmek seçimi de kaydırır.
@@ -1415,6 +1401,8 @@ void Island::DrawAlert(float w, float h) {
         case AlertKind::Copied: label = alertLabel_.c_str(); glyph = kGlyphCheck; color = kGreen; break;
         case AlertKind::Headphones: label = alertLabel_.c_str(); glyph = kGlyphHeadphone; color = kGreen; break;
         case AlertKind::HeadphonesLow: label = alertLabel_.c_str(); glyph = kGlyphHeadphone; color = kRed; break;
+        case AlertKind::Reading: label = alertLabel_.c_str(); glyph = kGlyphSync; color = accent_; break;
+        case AlertKind::OcrFailed: label = alertLabel_.c_str(); glyph = kGlyphError; color = kOrange; break;
         default: break;
         }
         Text(glyph, fIcon_.Get(), D2D1::RectF(12, 0, 40, h), color);
@@ -1458,6 +1446,39 @@ void Island::DrawAlert(float w, float h) {
 // ---------------------------------------------------------------------------
 
 void Island::OnClick(float x, float y) {
+    if (ToolsShown(view_)) {
+        int t = ToolHit(x, y);
+        if (t >= 0) {
+            RunTool(static_cast<Tool>(t));
+            return;
+        }
+        if (t <= -10) {
+            SetToolPage(-10 - t);
+            return;
+        }
+        if (y > ToolsTop()) return;  // araç sırasının boşlukları / raf
+    }
+    if (view_ == View::Note) {
+        if (x > viewW_ - 46 && y < 38) {  // çöp kutusu: notu sil
+            note_.clear();
+            SaveNote();
+            eyes_.SetMood(Eyes::Mood::Wink, Now(), 0.6);
+            StartAnimation();
+        }
+        return;
+    }
+    if (view_ == View::Ink) {
+        int hit = InkBarHit(x, y);
+        if (hit >= 0 && hit < 10) SetInkColor(hit);
+        if (hit == 10) InkUndo();
+        if (hit == 11) InkClear();
+        if (hit == 12) EndInk();
+        return;
+    }
+    if (view_ == View::Quick) {
+        QuickClick(QuickHit(x, y));
+        return;
+    }
     if (view_ == View::ExpandedMedia) {
         const float pad = 18.f, art = 64.f;
         float cy = pad + art + 14.f + 42.f, cx = width_.value / 2;
@@ -1502,6 +1523,7 @@ double Island::Now() const {
 bool Island::ViewShowsEyes() const {
     return view_ == View::Idle || view_ == View::Media || view_ == View::ExpandedIdle ||
            view_ == View::Timer || view_ == View::Command || view_ == View::Picker ||
+           view_ == View::Note || view_ == View::Ink || view_ == View::Quick ||
            (view_ == View::Alert && alertKind_ == AlertKind::Volume);
 }
 
@@ -1555,6 +1577,7 @@ void Island::MoodWithSound(Eyes::Mood mood, double duration) {
 void Island::SetHover(bool hover) {
     if (hover == hover_) return;
     hover_ = hover;
+    if (!hover) quickOpen_ = false;  // kapanınca bir dahaki açılış yine araçlarla başlar
     Sounds::Play(hover ? Sounds::Sound::Open : Sounds::Sound::Close);
 }
 
@@ -1671,6 +1694,17 @@ void Island::OnClipboardUpdate() {
     if (!IsClipboardFormatAvailable(CF_DIB) && !IsClipboardFormatAvailable(CF_BITMAP)) return;
     if (IsClipboardFormatAvailable(html) || IsClipboardFormatAvailable(CF_HDROP)) return;
     double now = Now();
+    if (ocrPending_) {
+        // "Yazı al" ile seçilen alan geldi: kart yerine Guti okusun.
+        ocrPending_ = false;
+        lastShot_ = now;  // alan seçici panoya iki kez yazabilir: ikincisi kart açmasın
+        if (now - ocrAskedAt_ < 60.0) {
+            ComPtr<IWICBitmap> bmp = ClipboardBitmap();
+            if (bmp && RunOcr(bmp.Get())) return;
+            OnOcrDone(-2, L"");
+            return;
+        }
+    }
     if (now - lastShot_ < 2.0) return;
     lastShot_ = now;
     lastActivity_ = now;
@@ -1741,6 +1775,7 @@ IWICImagingFactory* Island::Wic() {
 }
 
 void Island::TakeScreenshot() {
+    ocrPending_ = false;  // vazgeçilmiş bir "yazı al" bu görüntüyü okumasın
     // Windows'un kendi alan seçicisi; görüntü panoya gelince Guti kartı gösterir.
     ShellExecuteW(nullptr, L"open", L"ms-screenclip:", nullptr, nullptr, SW_SHOWNORMAL);
 }
@@ -1748,11 +1783,7 @@ void Island::TakeScreenshot() {
 bool Island::SaveClipboardImage() {
     IWICImagingFactory* wic = Wic();
     if (!wic) return false;
-    ComPtr<IWICBitmap> full;
-    if (!OpenClipboard(hwnd_)) return false;
-    if (auto hb = static_cast<HBITMAP>(GetClipboardData(CF_BITMAP)))
-        wic->CreateBitmapFromHBITMAP(hb, nullptr, WICBitmapIgnoreAlpha, &full);
-    CloseClipboard();
+    ComPtr<IWICBitmap> full = ClipboardBitmap();
     if (!full) return false;
     UINT w = 0, h = 0;
     full->GetSize(&w, &h);
@@ -1880,7 +1911,7 @@ void Island::OnDropFiles(const std::vector<std::wstring>& paths) {
 bool Island::ShelfVisible() const { return !shelf_.empty(); }
 
 float Island::ShelfTop() const {
-    return view_ == View::ExpandedMedia ? kExpandedMedia.h : kExpandedIdle.h;
+    return (view_ == View::ExpandedMedia ? kExpandedMedia.h : kExpandedIdle.h) + kToolsH;
 }
 
 int Island::ShelfHit(float x, float y) const {
@@ -1948,6 +1979,10 @@ void Island::OnVolume(int percent, bool muted) {
     bool wasMuted = muted_;
     volume_ = percent;
     muted_ = muted;
+    if (view_ == View::Quick) {  // hızlı ayarlarda sürgü zaten gösteriyor
+        StartAnimation();
+        return;
+    }
     if (!volumeOsd_ || before < 0 || Now() - startedAt_ < 3 || (before == percent && wasMuted == muted)) return;
     double now = Now();
     // Sessize alınca kulaklarını kapatır gibi gözlerini yumar; çok açınca irkilir.
@@ -2046,7 +2081,7 @@ LRESULT CALLBACK Island::PickerProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
 }
 
 void Island::StartPicker() {
-    if (picker_) return;
+    if (picker_ || ink_) return;
     if (commandMode_) CloseCommand(false);
     static bool registered = false;
     if (!registered) {
@@ -2132,8 +2167,10 @@ float Island::CommandHeight() const {
 
 void Island::OpenCommand() {
     if (commandMode_) return;
+    HWND keep = prevForeground_;  // nottan geçiliyorsa asıl uygulamayı unutma
+    CloseNote(false);
     HWND fg = GetForegroundWindow();
-    prevForeground_ = fg != hwnd_ ? fg : nullptr;
+    prevForeground_ = fg != hwnd_ ? fg : keep;
     commandMode_ = true;
     input_.clear();
     cmdResult_ = {};
@@ -2446,7 +2483,8 @@ void Island::OnLookTimer() {
     SYSTEMTIME lt;
     GetLocalTime(&lt);
     double sleepAfter = lt.wHour < 6 ? 30 : 90;
-    if (now - lastActivity_ > sleepAfter && eyes_.CurrentMood() == Eyes::Mood::Normal) {
+    if (coffee_ && eyes_.CurrentMood() == Eyes::Mood::Sleepy) eyes_.SetMood(Eyes::Mood::Normal, now, 0);
+    if (!coffee_ && now - lastActivity_ > sleepAfter && eyes_.CurrentMood() == Eyes::Mood::Normal) {
         eyes_.SetMood(Eyes::Mood::Sleepy, now, 0);
     }
 
@@ -2465,7 +2503,7 @@ void Island::OnLookTimer() {
     float dropPad = 36.f * scale_;
     bool nearDrop = pt.x >= cx - halfW - dropPad && pt.x <= cx + halfW + dropPad && pt.y >= monitor_.top &&
                     pt.y <= top + height_.value * scale_ + dropPad;
-    bool arm = leftDown && !downStartedOver_ && nearDrop && !commandMode_;
+    bool arm = leftDown && !downStartedOver_ && nearDrop && !Typing() && !ink_ && sliderDrag_ < 0;
     if (arm != dropArmed_ && !dropHover_) {
         dropArmed_ = arm;
         Update();
@@ -2487,7 +2525,7 @@ void Island::OnLookTimer() {
             hoverSince_ = 0;
         }
     } else {
-        if (over) {
+        if (over || sliderDrag_ >= 0) {
             outsideSince_ = 0;
         } else if (outsideSince_ == 0) {
             outsideSince_ = now;
@@ -2499,6 +2537,7 @@ void Island::OnLookTimer() {
     }
 
     if (commandMode_) eyes_.LookAt(0.7f, 0.15f);  // yazdıklarına bakar
+    else if (noteMode_) eyes_.LookAt(0.35f, 0.7f);  // nota bakar
     else eyes_.LookAt(dx / (700.f * scale_), dy / (380.f * scale_));
     if (eyes_.Tick(now) && ViewShowsEyes()) StartAnimation();
 }
@@ -2579,6 +2618,10 @@ void Island::ShowTrayMenu() {
     AppendMenuW(menu, MF_STRING, kCmdCommand, L"Hesap · çevir · hatırlat · pano\tCtrl+Alt+Boşluk");
     AppendMenuW(menu, MF_STRING, kCmdShot, L"Ekran görüntüsü al\tCtrl+Alt+S");
     AppendMenuW(menu, MF_STRING, kCmdPicker, L"Ekrandan renk seç\tCtrl+Alt+C");
+    AppendMenuW(menu, MF_STRING, kCmdOcr, L"Ekrandan yazı kopyala\tCtrl+Alt+O");
+    AppendMenuW(menu, MF_STRING, kCmdNote, L"Not\tCtrl+Alt+N");
+    AppendMenuW(menu, MF_STRING | (ink_ ? MF_CHECKED : 0), kCmdInk, L"Ekrana çiz\tCtrl+Alt+P");
+    AppendMenuW(menu, MF_STRING | (coffee_ ? MF_CHECKED : 0), kCmdCoffee, L"Uyanık tut (kahve)");
     if (!shelf_.empty()) AppendMenuW(menu, MF_STRING, kCmdClearShelf, L"Rafı boşalt");
     AppendMenuW(menu, MF_STRING, kCmdFocus, focusing ? L"Odak modunu bitir" : focusLabel);
     if (companion_.Kind() == Companion::TimerKind::Quick)
@@ -2595,31 +2638,20 @@ void Island::ShowTrayMenu() {
     DestroyMenu(menu);
     if (cmd == kCmdAutostart) SetAutostart(!IsAutostartEnabled());
     if (cmd == kCmdToggle) ToggleUserHidden();
-    if (cmd == kCmdSounds) {
-        Sounds::SetEnabled(!Sounds::Enabled());
-        WriteSetting(L"Sounds", Sounds::Enabled() ? 1 : 0);
-        Sounds::Play(Sounds::Sound::Pet);
+    if (cmd == kCmdSounds) ToggleSounds();
+    if (cmd == kCmdFocus) ToggleFocus();
+    if (cmd == kCmdOcr) StartOcr();
+    if (cmd == kCmdNote) OpenNote();
+    if (cmd == kCmdInk) {
+        if (ink_) EndInk();
+        else StartInk();
     }
-    if (cmd == kCmdFocus) {
-        if (companion_.Kind() == Companion::TimerKind::Focus ||
-            companion_.Kind() == Companion::TimerKind::Break) {
-            companion_.CancelTimer();
-        } else {
-            companion_.StartTimer(Companion::TimerKind::Focus, Companion::kFocusMinutes, Now());
-            eyes_.SetMood(Eyes::Mood::Focused, Now(), 0);
-            Sounds::Play(Sounds::Sound::Pet);
-        }
-        Update();
-    }
+    if (cmd == kCmdCoffee) SetCoffee(!coffee_);
     if (cmd == kCmdCancelTimer) {
         companion_.CancelTimer();
         Update();
     }
-    if (cmd == kCmdUpdate) {
-        if (userHidden_) ToggleUserHidden();  // ilerlemeyi adada göster
-        ShowAlert(AlertKind::Updating, availableVersion_, 0);
-        Updater::CheckAsync(hwnd_, true);
-    }
+    if (cmd == kCmdUpdate) StartUpdate();
     if (cmd == kCmdShot) TakeScreenshot();
     if (cmd == kCmdPicker) StartPicker();
     if (cmd == kCmdVolumeOsd) {
@@ -2688,6 +2720,17 @@ LRESULT Island::WndProc(UINT msg, WPARAM wp, LPARAM lp) {
         return MA_NOACTIVATE;  // tıklayınca açık uygulamanın odağını çalma
 
     case WM_LBUTTONDOWN:
+        if (view_ == View::Quick) {
+            float x = GET_X_LPARAM(lp) / scale_ - kPad, y = GET_Y_LPARAM(lp) / scale_;
+            int hit = QuickHit(x, y);
+            if (hit == 10 || hit == 11) {
+                // Sürgüyü tut ve kaydır: fare adadan çıksa da bırakana kadar takip edilir.
+                sliderDrag_ = hit - 10;
+                SetCapture(hwnd_);
+                QuickSlider(sliderDrag_, x);
+                return 0;
+            }
+        }
         if (IsFileCard()) {
             // Basılı tutup çekersen dosya sürüklenir; sadece tıklarsan açılır.
             POINT pt{GET_X_LPARAM(lp), GET_Y_LPARAM(lp)};
@@ -2730,6 +2773,12 @@ LRESULT Island::WndProc(UINT msg, WPARAM wp, LPARAM lp) {
         return 0;
 
     case WM_LBUTTONUP:
+        if (sliderDrag_ >= 0) {
+            sliderDrag_ = -1;
+            ReleaseCapture();
+            StartAnimation();
+            return 0;
+        }
         if (IsFileCard() || Now() < swallowUpUntil_) {
             swallowUpUntil_ = 0;
             return 0;
@@ -2747,10 +2796,19 @@ LRESULT Island::WndProc(UINT msg, WPARAM wp, LPARAM lp) {
         OnMouseMove(GET_X_LPARAM(lp) / scale_ - kPad, GET_Y_LPARAM(lp) / scale_);
         return 0;
 
+    case WM_CAPTURECHANGED:
+        if (sliderDrag_ >= 0 && reinterpret_cast<HWND>(lp) != hwnd_) {
+            sliderDrag_ = -1;
+            StartAnimation();
+        }
+        return 0;
+
     case WM_MOUSELEAVE:
         trackingLeave_ = false;
         hoverBtn_ = -1;
+        hoverTool_ = -1;
         for (auto& g : btnGlow_) g.target = 0.f;
+        for (auto& g : toolGlow_) g.target = 0.f;
         if (pressBtn_ >= 0) btnScale_[pressBtn_].target = 1.f;
         pressBtn_ = -1;
         StartAnimation();
@@ -2763,6 +2821,7 @@ LRESULT Island::WndProc(UINT msg, WPARAM wp, LPARAM lp) {
 
     case WM_CHAR:
         if (commandMode_) OnCommandChar(static_cast<wchar_t>(wp));
+        else if (noteMode_) OnNoteChar(static_cast<wchar_t>(wp));
         return 0;
 
     case WM_KEYDOWN:
@@ -2770,7 +2829,10 @@ LRESULT Island::WndProc(UINT msg, WPARAM wp, LPARAM lp) {
         return 0;
 
     case WM_ACTIVATE:
-        if (LOWORD(wp) == WA_INACTIVE && commandMode_) CloseCommand(false);  // başka yere tıklandı
+        if (LOWORD(wp) == WA_INACTIVE) {  // başka yere tıklandı
+            CloseCommand(false);
+            CloseNote(false);
+        }
         break;
 
     case VolumeWatch::WM_VOLUME_CHANGED:
@@ -2786,6 +2848,26 @@ LRESULT Island::WndProc(UINT msg, WPARAM wp, LPARAM lp) {
         OnBtBattery(static_cast<int>(wp), name ? *name : std::wstring());
         return 0;
     }
+
+    case Ocr::WM_OCR_DONE: {
+        std::unique_ptr<std::wstring> text(reinterpret_cast<std::wstring*>(lp));
+        OnOcrDone(static_cast<int>(static_cast<INT_PTR>(wp)), text ? *text : std::wstring());
+        return 0;
+    }
+
+    case Radios::WM_RADIOS:
+        radios_ = static_cast<int>(wp);
+        StartAnimation();
+        return 0;
+
+    case Brightness::WM_BRIGHTNESS:
+        if (wp == 255) {
+            if (brightness_ < 0) brightness_ = 255;  // okunamadı: desteklenmiyor (tek bir yazma hatası değil)
+        } else if (sliderDrag_ != 0 && Now() - brightSetAt_ > 1.0) {
+            brightness_ = static_cast<int>(wp);
+        }
+        StartAnimation();
+        return 0;
 
     case WM_CLIPBOARDUPDATE:
         OnClipboardUpdate();
@@ -2911,6 +2993,30 @@ LRESULT Island::WndProc(UINT msg, WPARAM wp, LPARAM lp) {
             OnCommandKey(notches > 0 ? VK_UP : VK_DOWN);
             return 0;
         }
+        {
+            POINT pt{GET_X_LPARAM(lp), GET_Y_LPARAM(lp)};
+            ScreenToClient(hwnd_, &pt);
+            float x = pt.x / scale_ - kPad, y = pt.y / scale_;
+            if (ToolsShown(view_) && y >= ToolsTop() && y <= ToolsTop() + kToolsH) {
+                SetToolPage(toolPage_ + (notches < 0 ? 1 : -1));  // araç sırasında teker: sayfa çevir
+                return 0;
+            }
+            if (view_ == View::Quick) {
+                int hit = QuickHit(x, y);
+                if (hit == 10 && brightness_ >= 0 && brightness_ <= 100) {
+                    brightness_ = std::clamp(brightness_ + notches * 5, 0, 100);
+                    brightSetAt_ = Now();
+                    Brightness::Set(hwnd_, brightness_);
+                } else if (hit == 11 && volume_ >= 0) {
+                    volume_ = std::clamp(volume_ + notches * 2, 0, 100);
+                    muted_ = false;
+                    VolumeWatch::Set(volume_);
+                }
+                StartAnimation();
+                return 0;
+            }
+            if (view_ == View::Note || view_ == View::Ink) return 0;
+        }
         int step = (GET_KEYSTATE_WPARAM(wp) & MK_CONTROL) ? 5 : 1;
         companion_.AdjustPending(notches * step, Now());
         eyes_.SetMood(Eyes::Mood::Curious, Now(), 1.0);
@@ -2924,6 +3030,15 @@ LRESULT Island::WndProc(UINT msg, WPARAM wp, LPARAM lp) {
         if (wp == kHotkeyToggle) ToggleUserHidden();
         if (wp == kHotkeyShot) TakeScreenshot();
         if (wp == kHotkeyPicker) StartPicker();
+        if (wp == kHotkeyOcr) StartOcr();
+        if (wp == kHotkeyNote) {
+            if (noteMode_) CloseNote(true);
+            else OpenNote();
+        }
+        if (wp == kHotkeyInk) {
+            if (ink_) EndInk();
+            else StartInk();
+        }
         if (wp == kHotkeyCommand) {
             if (commandMode_) {
                 CloseCommand(true);
@@ -2968,11 +3083,17 @@ LRESULT Island::WndProc(UINT msg, WPARAM wp, LPARAM lp) {
 
     case WM_DESTROY: {
         companion_.Save();
+        if (noteMode_) SaveNote();
+        if (ink_) EndInk();
+        if (coffee_) SetThreadExecutionState(ES_CONTINUOUS);
         RemoveClipboardFormatListener(hwnd_);
         UnregisterHotKey(hwnd_, kHotkeyToggle);
         UnregisterHotKey(hwnd_, kHotkeyCommand);
         UnregisterHotKey(hwnd_, kHotkeyShot);
         UnregisterHotKey(hwnd_, kHotkeyPicker);
+        UnregisterHotKey(hwnd_, kHotkeyOcr);
+        UnregisterHotKey(hwnd_, kHotkeyNote);
+        UnregisterHotKey(hwnd_, kHotkeyInk);
         RevokeDragDrop(hwnd_);
         if (dropTarget_) dropTarget_->Release();
         dropTarget_ = nullptr;

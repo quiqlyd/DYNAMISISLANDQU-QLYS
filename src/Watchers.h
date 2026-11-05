@@ -72,6 +72,8 @@ constexpr UINT WM_VOLUME_CHANGED = WM_APP + 5;
 constexpr UINT WM_VOLUME_DEVICE = WM_APP + 6;  // varsayılan hoparlör değişti: Rebind çağır
 void Start(HWND notify);
 void Rebind();
+bool Get(int& percent, bool& muted);  // şu anki düzey
+void Set(int percent);                // 0-100; sessizdeyse sesi de açar
 }  // namespace VolumeWatch
 
 // Bluetooth kulaklık pili: arka planda 30 sn'de bir bakar, değişince haber verir.

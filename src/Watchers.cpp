@@ -355,6 +355,24 @@ void VolumeWatch::Rebind() {
     g_volume->RegisterControlChangeNotify(g_volumeCb);
 }
 
+bool VolumeWatch::Get(int& percent, bool& muted) {
+    if (!g_volume) return false;
+    float v = 0;
+    BOOL m = FALSE;
+    if (FAILED(g_volume->GetMasterVolumeLevelScalar(&v)) || FAILED(g_volume->GetMute(&m))) return false;
+    percent = static_cast<int>(v * 100.f + 0.5f);
+    muted = m != FALSE;
+    return true;
+}
+
+void VolumeWatch::Set(int percent) {
+    if (!g_volume) return;
+    percent = std::clamp(percent, 0, 100);
+    g_volume->SetMasterVolumeLevelScalar(percent / 100.f, nullptr);
+    BOOL m = FALSE;
+    if (percent > 0 && SUCCEEDED(g_volume->GetMute(&m)) && m) g_volume->SetMute(FALSE, nullptr);
+}
+
 // ---------------------------------------------------------------------------
 // Bluetooth kulaklık pili
 // ---------------------------------------------------------------------------
