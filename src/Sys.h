@@ -31,3 +31,10 @@ void Refresh(HWND notify);
 // Sürüklerken art arda çağrılabilir: arka planda sadece en son değer uygulanır.
 void Set(HWND notify, int percent);
 }  // namespace Brightness
+
+// Gece ışığı. Windows bunun için resmi bir arayüz sunmuyor; Ayarlar uygulamasının kendi
+// sakladığı küçük durum kaydı okunup değiştirilir. Biçim tanınmazsa hiçbir şeye dokunulmaz.
+namespace NightLight {
+int State();    // 1 açık, 0 kapalı, -1 okunamadı
+bool Toggle();  // false: değiştirilemedi (çağıran Ayarlar'ı açabilir)
+}  // namespace NightLight

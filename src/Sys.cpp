@@ -235,3 +235,64 @@ void Brightness::Refresh(HWND notify) { BrightnessRequest(notify, -1); }
 void Brightness::Set(HWND notify, int percent) {
     BrightnessRequest(notify, percent < 0 ? 0 : (percent > 100 ? 100 : percent));
 }
+
+// ---------------------------------------------------------------------------
+// Gece ışığı
+// ---------------------------------------------------------------------------
+
+namespace {
+constexpr wchar_t kNightKey[] =
+    L"Software\\Microsoft\\Windows\\CurrentVersion\\CloudStore\\Store\\DefaultAccount\\Current\\"
+    L"default$windows.data.bluelightreduction.bluelightreductionstate\\"
+    L"windows.data.bluelightreduction.bluelightreductionstate";
+
+bool ReadNight(std::vector<BYTE>& data) {
+    DWORD size = 0;
+    if (RegGetValueW(HKEY_CURRENT_USER, kNightKey, L"Data", RRF_RT_REG_BINARY, nullptr, nullptr, &size) !=
+            ERROR_SUCCESS ||
+        size < 30 || size > 256)
+        return false;
+    data.resize(size);
+    if (RegGetValueW(HKEY_CURRENT_USER, kNightKey, L"Data", RRF_RT_REG_BINARY, nullptr, data.data(), &size) !=
+        ERROR_SUCCESS)
+        return false;
+    data.resize(size);
+    return true;
+}
+
+// Bilinen düzen: 18. bayt 0x15 açık / 0x13 kapalı; açıkken 23. bayttan itibaren fazladan "10 00" var.
+int Decode(const std::vector<BYTE>& d) {
+    if (d.size() < 26) return -1;
+    if (d[18] == 0x15 && d[23] == 0x10 && d[24] == 0x00) return 1;
+    if (d[18] == 0x13) return 0;
+    return -1;
+}
+}  // namespace
+
+int NightLight::State() {
+    std::vector<BYTE> d;
+    return ReadNight(d) ? Decode(d) : -1;
+}
+
+bool NightLight::Toggle() {
+    std::vector<BYTE> d;
+    if (!ReadNight(d)) return false;
+    int state = Decode(d);
+    if (state < 0) return false;
+    if (state == 1) {
+        d.erase(d.begin() + 23, d.begin() + 25);
+        d[18] = 0x13;
+    } else {
+        d.insert(d.begin() + 23, {0x10, 0x00});
+        d[18] = 0x15;
+    }
+    // Değişiklik zamanı: Windows yeni kaydı ancak zaman damgası ilerleyince uygular.
+    for (int i = 10; i < 15; ++i) {
+        if (d[i] != 0xff) {
+            ++d[i];
+            break;
+        }
+    }
+    return RegSetKeyValueW(HKEY_CURRENT_USER, kNightKey, L"Data", REG_BINARY, d.data(),
+                           static_cast<DWORD>(d.size())) == ERROR_SUCCESS;
+}

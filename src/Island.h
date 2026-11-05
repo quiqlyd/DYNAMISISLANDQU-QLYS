@@ -385,5 +385,6 @@ private:
     int radios_ = -1;       // Sys.h Radios bitleri; -1: bilinmiyor
     int brightness_ = -1;   // 0-100, 255: desteklenmiyor, -1: okunuyor
     int sliderDrag_ = -1;   // 0 parlaklık, 1 ses
+    int nightLight_ = -1;   // 1 açık, 0 kapalı, -1 bilinmiyor
     double brightSetAt_ = -1e9;  // son elle ayar: eski yankılar sürgüyü geri itmesin
 };
