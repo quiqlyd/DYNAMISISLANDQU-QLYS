@@ -30,6 +30,7 @@ constexpr UINT_PTR kTimerLook = 6;
 constexpr UINT_PTR kTimerUpdateCheck = 7;
 constexpr int kHotkeyToggle = 1;
 constexpr int kHotkeyCommand = 2;
+constexpr int kHotkeyShot = 3;
 
 constexpr UINT kTrayMsg = WM_APP + 2;
 constexpr UINT kTrayId = 1;
@@ -41,10 +42,12 @@ constexpr UINT kCmdSounds = 104;
 constexpr UINT kCmdFocus = 105;
 constexpr UINT kCmdCancelTimer = 106;
 constexpr UINT kCmdCommand = 107;
+constexpr UINT kCmdShot = 108;
+constexpr UINT kCmdClearShelf = 109;
 constexpr wchar_t kSettingsKey[] = L"Software\\DynamisIsland";
 
 constexpr float kTopMargin = 4.f;
-constexpr float kMaxW = 420.f, kMaxH = 200.f;
+constexpr float kMaxW = 420.f, kMaxH = 230.f;
 
 // Görünüm boyutları (DIP)
 struct Size3 { float w, h, r; };
@@ -55,6 +58,10 @@ constexpr Size3 kExpandedIdle{320, 96, 36};
 constexpr Size3 kAlert{300, 40, 20};
 constexpr Size3 kTimer{128, 24, 12};
 constexpr Size3 kDownload{340, 46, 23};
+constexpr Size3 kShot{360, 92, 28};
+constexpr Size3 kDrop{260, 46, 23};
+constexpr float kShelfH = 58.f, kShelfCell = 58.f;
+constexpr int kShelfMax = 8, kShelfShown = 5;
 constexpr float kCommandW = 420.f, kCommandRow = 26.f, kCommandBar = 48.f;
 
 // Segoe Fluent Icons
@@ -71,6 +78,7 @@ constexpr wchar_t kGlyphTimer[] = L"\xE916";
 constexpr wchar_t kGlyphDownload[] = L"\xE896";
 constexpr wchar_t kGlyphWarning[] = L"\xE7BA";
 constexpr wchar_t kGlyphGlobe[] = L"\xE774";
+constexpr wchar_t kGlyphClose[] = L"\xE711";
 
 constexpr wchar_t kRunKey[] = L"Software\\Microsoft\\Windows\\CurrentVersion\\Run";
 constexpr wchar_t kRunValue[] = L"DynamisIsland";
@@ -166,6 +174,71 @@ D2D1_COLOR_F AccentFromArt(IWICBitmapSource* src) {
 }  // namespace
 
 // ---------------------------------------------------------------------------
+// Dosya rafı: adaya bırakılan dosyaları alan küçük OLE hedefi
+// ---------------------------------------------------------------------------
+
+class DropTarget : public IDropTarget {
+public:
+    explicit DropTarget(Island* island) : island_(island) {}
+    HRESULT STDMETHODCALLTYPE QueryInterface(REFIID riid, void** out) override {
+        if (riid == IID_IUnknown || riid == IID_IDropTarget) {
+            *out = static_cast<IDropTarget*>(this);
+            AddRef();
+            return S_OK;
+        }
+        *out = nullptr;
+        return E_NOINTERFACE;
+    }
+    ULONG STDMETHODCALLTYPE AddRef() override { return ++refs_; }
+    ULONG STDMETHODCALLTYPE Release() override {
+        ULONG r = --refs_;
+        if (!r) delete this;
+        return r;
+    }
+    HRESULT STDMETHODCALLTYPE DragEnter(IDataObject* data, DWORD, POINTL, DWORD* effect) override {
+        FORMATETC fe{CF_HDROP, nullptr, DVASPECT_CONTENT, -1, TYMED_HGLOBAL};
+        hasFiles_ = data && data->QueryGetData(&fe) == S_OK;
+        *effect = hasFiles_ ? DROPEFFECT_COPY : DROPEFFECT_NONE;  // kopya: kaynak dosya silinmez
+        if (hasFiles_) island_->OnDropEnter();
+        return S_OK;
+    }
+    HRESULT STDMETHODCALLTYPE DragOver(DWORD, POINTL, DWORD* effect) override {
+        *effect = hasFiles_ ? DROPEFFECT_COPY : DROPEFFECT_NONE;
+        return S_OK;
+    }
+    HRESULT STDMETHODCALLTYPE DragLeave() override {
+        if (hasFiles_) island_->OnDropLeave();
+        hasFiles_ = false;
+        return S_OK;
+    }
+    HRESULT STDMETHODCALLTYPE Drop(IDataObject* data, DWORD, POINTL, DWORD* effect) override {
+        *effect = DROPEFFECT_NONE;
+        std::vector<std::wstring> paths;
+        FORMATETC fe{CF_HDROP, nullptr, DVASPECT_CONTENT, -1, TYMED_HGLOBAL};
+        STGMEDIUM sm{};
+        if (hasFiles_ && SUCCEEDED(data->GetData(&fe, &sm))) {
+            auto drop = static_cast<HDROP>(sm.hGlobal);
+            UINT n = DragQueryFileW(drop, 0xFFFFFFFF, nullptr, 0);
+            for (UINT i = 0; i < n; ++i) {
+                wchar_t path[MAX_PATH * 2];
+                if (DragQueryFileW(drop, i, path, ARRAYSIZE(path))) paths.push_back(path);
+            }
+            ReleaseStgMedium(&sm);
+            *effect = DROPEFFECT_COPY;
+        }
+        hasFiles_ = false;
+        if (paths.empty()) island_->OnDropLeave();
+        else island_->OnDropFiles(paths);
+        return S_OK;
+    }
+
+private:
+    Island* island_;
+    ULONG refs_ = 1;
+    bool hasFiles_ = false;
+};
+
+// ---------------------------------------------------------------------------
 // Kurulum
 // ---------------------------------------------------------------------------
 
@@ -226,6 +299,23 @@ bool Island::Create(HINSTANCE instance) {
     SetTimer(hwnd_, kTimerUpdateCheck, 20 * 1000, nullptr);  // açılıştan 20 sn sonra, sonra 6 saatte bir
     RegisterHotKey(hwnd_, kHotkeyToggle, MOD_CONTROL | MOD_ALT | MOD_NOREPEAT, 'D');
     RegisterHotKey(hwnd_, kHotkeyCommand, MOD_CONTROL | MOD_ALT | MOD_NOREPEAT, VK_SPACE);
+    RegisterHotKey(hwnd_, kHotkeyShot, MOD_CONTROL | MOD_ALT | MOD_NOREPEAT, 'S');
+    dropTarget_ = new DropTarget(this);
+    RegisterDragDrop(hwnd_, dropTarget_);
+    {
+        // Önceki oturumun geçici ekran görüntülerini temizle.
+        wchar_t tmp[MAX_PATH];
+        if (GetTempPathW(MAX_PATH, tmp)) {
+            std::wstring dir = std::wstring(tmp) + L"Guti\\";
+            WIN32_FIND_DATAW fd;
+            HANDLE f = FindFirstFileW((dir + L"*.png").c_str(), &fd);
+            if (f != INVALID_HANDLE_VALUE) {
+                do DeleteFileW((dir + fd.cFileName).c_str());
+                while (FindNextFileW(f, &fd));
+                FindClose(f);
+            }
+        }
+    }
     LoadReminders();
     userHidden_ = ReadSetting(L"Hidden", 0) != 0;
     Update();
@@ -288,6 +378,7 @@ void Island::UpdateDpi(UINT dpi) {
 
 Island::View Island::TargetView() const {
     if (commandMode_) return View::Command;
+    if (dropHover_) return View::Drop;
     if (alertActive_) return View::Alert;
     bool timer = companion_.TimerActive() || companion_.Pending();
     if (hover_) {
@@ -305,10 +396,14 @@ void Island::SetTargets(View v) {
     case View::Media: s = kMedia; break;
     case View::ExpandedMedia: s = kExpandedMedia; break;
     case View::ExpandedIdle: s = kExpandedIdle; break;
-    case View::Alert: s = IsDownloadAlert() ? kDownload : kAlert; break;
+    case View::Alert:
+        s = !IsFileCard() ? kAlert : (alertKind_ == AlertKind::Screenshot ? kShot : kDownload);
+        break;
     case View::Timer: s = kTimer; break;
     case View::Command: s = {kCommandW, CommandHeight(), 24}; break;
+    case View::Drop: s = kDrop; break;
     }
+    if ((v == View::ExpandedIdle || v == View::ExpandedMedia) && ShelfVisible()) s.h += kShelfH;
     width_.target = s.w;
     height_.target = s.h;
     radius_.target = s.r;
@@ -323,8 +418,8 @@ void Island::Update() {
     SetTargets(v);
     // Küçük hâlde tıklamalar alttaki pencereye (ör. tarayıcı sekmeleri) geçer.
     // İndirme kartı ise tıklanır ve sürüklenir.
-    bool interactive = v == View::ExpandedMedia || v == View::ExpandedIdle || IsDownloadAlert() ||
-                       v == View::Command;
+    bool interactive = v == View::ExpandedMedia || v == View::ExpandedIdle || IsFileCard() ||
+                       v == View::Command || v == View::Drop || dropArmed_;
     LONG_PTR ex = GetWindowLongPtrW(hwnd_, GWL_EXSTYLE);
     LONG_PTR want = interactive ? (ex & ~static_cast<LONG_PTR>(WS_EX_TRANSPARENT))
                                 : (ex | WS_EX_TRANSPARENT);
@@ -465,6 +560,11 @@ void Island::ShowAlert(AlertKind kind, int value, UINT durationMs) {
         shake_.velocity += 120.f;
         break;
     case AlertKind::ReminderSet: MoodWithSound(Eyes::Mood::Happy, 1.4); break;
+    case AlertKind::Screenshot:
+        eyes_.SetMood(Eyes::Mood::Wink, now, 1.2);  // "çektim!"
+        Sounds::Play(Sounds::Sound::Shutter);
+        height_.velocity += 90.f;
+        break;
     default: break;
     }
     Update();
@@ -580,6 +680,7 @@ bool Island::EnsureResources() {
         fTinyRight_ = MakeFormat(f, ui, 11.5f, DWRITE_FONT_WEIGHT_NORMAL, aT, false);
         fAlert_ = MakeFormat(f, ui, 13.5f, DWRITE_FONT_WEIGHT_SEMI_BOLD, aL, true);
         fAlertRight_ = MakeFormat(f, ui, 13.5f, DWRITE_FONT_WEIGHT_SEMI_BOLD, aT, false);
+        fSmallCenter_ = MakeFormat(f, ui, 10.5f, DWRITE_FONT_WEIGHT_NORMAL, aC, true);
         if (!fClock_) return false;
     }
     if (!roundStroke_) {
@@ -606,6 +707,8 @@ bool Island::EnsureResources() {
 
 void Island::DiscardDeviceResources() {
     brush_.Reset();
+    shotBitmap_.Reset();
+    for (auto& it : shelf_) it.icon.Reset();
     artBitmap_.Reset();
     rt_.Reset();
 }
@@ -650,6 +753,16 @@ void Island::Render() {
     case View::Alert: DrawAlert(w, h); break;
     case View::Timer: DrawTimer(w, h); break;
     case View::Command: DrawCommand(w, h); break;
+    case View::Drop: DrawDrop(w, h); break;
+    }
+    if ((view_ == View::ExpandedIdle || view_ == View::ExpandedMedia) && ShelfVisible()) DrawShelf(w);
+    if (view_ == View::Idle && !shelf_.empty()) {
+        // Rafta dosya var: solda minik kâğıt yığını
+        brush_->SetColor(Rgba(1, 1, 1, 0.5f));
+        D2D1_ROUNDED_RECT a{D2D1::RectF(7, h / 2 - 4, 13, h / 2 + 3), 1.2f, 1.2f};
+        rt_->DrawRoundedRectangle(a, brush_.Get(), 1.f);
+        D2D1_ROUNDED_RECT b{D2D1::RectF(9, h / 2 - 2, 15, h / 2 + 5), 1.2f, 1.2f};
+        rt_->FillRoundedRectangle(b, brush_.Get());
     }
     // Kamera / mikrofon açıkken küçük renkli nokta (yeşil kamera, turuncu mikrofon).
     switch (view_) {
@@ -659,7 +772,8 @@ void Island::Render() {
     case View::ExpandedIdle:
     case View::ExpandedMedia: DrawPrivacyDots(w / 2 + 6.f, 9.f); break;
     case View::Alert:
-    case View::Command: break;
+    case View::Command:
+    case View::Drop: break;
     }
     if (layer && clip) rt_->PopLayer();
 
@@ -817,6 +931,7 @@ void Island::DrawExpandedIdle(float w, float h) {
         Text(buf, fDate_.Get(), D2D1::RectF(28, 56, w - 150, 80), kOrange);
     } else
         Text(FormatDate(st).c_str(), fDate_.Get(), D2D1::RectF(28, 56, w - 150, 80), kGray);
+    h = kExpandedIdle.h;  // raf açıksa alt kısım rafındır
     eyes_.Draw(rt_.Get(), d2d_.Get(), brush_.Get(), roundStroke_.Get(), w - 128, h / 2, 1.6f, 0.f);
 
     SYSTEM_POWER_STATUS ps{};
@@ -896,8 +1011,8 @@ void Island::DrawPrivacyDots(float right, float cy) {
 
 void Island::DrawDownload(float w, float h) {
     Text(kGlyphDownload, fIcon_.Get(), D2D1::RectF(12, 0, 42, h), kGreen);
-    size_t slash = downloadPath_.find_last_of(L'\\');
-    std::wstring name = slash == std::wstring::npos ? downloadPath_ : downloadPath_.substr(slash + 1);
+    size_t slash = cardPath_.find_last_of(L'\\');
+    std::wstring name = slash == std::wstring::npos ? cardPath_ : cardPath_.substr(slash + 1);
     Text(L"İndirme bitti · sürükle ya da tıkla", fSmall_.Get(), D2D1::RectF(48, 4, w - 18, 20), kGray);
     Text(name.c_str(), fAlert_.Get(), D2D1::RectF(48, 18, w - 18, h - 4), kWhite);
 }
@@ -905,6 +1020,10 @@ void Island::DrawDownload(float w, float h) {
 void Island::DrawAlert(float w, float h) {
     if (alertKind_ == AlertKind::Download) {
         DrawDownload(w, h);
+        return;
+    }
+    if (alertKind_ == AlertKind::Screenshot) {
+        DrawScreenshot(w, h);
         return;
     }
     if (alertKind_ >= AlertKind::UpdateAvailable) {
@@ -1182,21 +1301,49 @@ void Island::OnClipboardUpdate() {
     if (now - lastShot_ < 2.0) return;
     lastShot_ = now;
     lastActivity_ = now;
-    eyes_.SetMood(Eyes::Mood::Wink, now, 1.2);  // "çektim!"
+    if (!commandMode_ && SaveClipboardImage()) {
+        ShowAlert(AlertKind::Screenshot, 0, 8000);  // önizleme kartı: sürükle ya da aç
+        return;
+    }
+    eyes_.SetMood(Eyes::Mood::Wink, now, 1.2);
     Sounds::Play(Sounds::Sound::Shutter);
     height_.velocity += 70.f;
     StartAnimation();
 }
 
 void Island::OnDownload(const std::wstring& path) {
-    downloadPath_ = path;
+    cardPath_ = path;
     ShowAlert(AlertKind::Download, 0, 8000);
 }
 
-void Island::OpenDownloadFolder() {
-    if (downloadPath_.empty()) return;
-    if (PIDLIST_ABSOLUTE pidl = ILCreateFromPathW(downloadPath_.c_str())) {
-        AllowSetForegroundWindow(ASFW_ANY);
+bool Island::DragFiles(const std::vector<std::wstring>& paths) {
+    std::vector<PIDLIST_ABSOLUTE> pidls;
+    for (const auto& p : paths)
+        if (PIDLIST_ABSOLUTE id = ILCreateFromPathW(p.c_str())) pidls.push_back(id);
+    bool dropped = false;
+    ComPtr<IShellItemArray> items;
+    ComPtr<IDataObject> data;
+    if (!pidls.empty() &&
+        SUCCEEDED(SHCreateShellItemArrayFromIDLists(static_cast<UINT>(pidls.size()), pidls.data(), &items)) &&
+        SUCCEEDED(items->BindToHandler(nullptr, BHID_DataObject, IID_PPV_ARGS(&data)))) {
+        eyes_.SetMood(Eyes::Mood::Surprised, Now(), 0.8);
+        StartAnimation();
+        DWORD effect = DROPEFFECT_NONE;
+        HRESULT hr = SHDoDragDrop(hwnd_, data.Get(), nullptr,
+                                  DROPEFFECT_COPY | DROPEFFECT_MOVE | DROPEFFECT_LINK, &effect);
+        dropped = hr == DRAGDROP_S_DROP;
+        if (dropped) MoodWithSound(Eyes::Mood::Happy, 1.4);  // teslim edildi
+    }
+    for (auto id : pidls) ILFree(id);
+    return dropped;
+}
+
+void Island::OpenCard() {
+    if (cardPath_.empty()) return;
+    AllowSetForegroundWindow(ASFW_ANY);
+    if (alertKind_ == AlertKind::Screenshot) {
+        ShellExecuteW(nullptr, L"open", cardPath_.c_str(), nullptr, nullptr, SW_SHOWNORMAL);
+    } else if (PIDLIST_ABSOLUTE pidl = ILCreateFromPathW(cardPath_.c_str())) {
         SHOpenFolderAndSelectItems(pidl, 0, nullptr, 0);
         ILFree(pidl);
     }
@@ -1206,27 +1353,208 @@ void Island::OpenDownloadFolder() {
     Update();
 }
 
-void Island::StartDownloadDrag() {
-    ComPtr<IShellItem> item;
-    ComPtr<IDataObject> data;
-    if (FAILED(SHCreateItemFromParsingName(downloadPath_.c_str(), nullptr, IID_PPV_ARGS(&item))) ||
-        FAILED(item->BindToHandler(nullptr, BHID_DataObject, IID_PPV_ARGS(&data)))) {
-        OpenDownloadFolder();  // dosya taşınmış olabilir
-        return;
-    }
+void Island::StartCardDrag() {
     KillTimer(hwnd_, kTimerAlert);  // sürüklerken kart kaybolmasın
-    eyes_.SetMood(Eyes::Mood::Surprised, Now(), 0.8);
-    StartAnimation();
-    DWORD effect = DROPEFFECT_NONE;
-    HRESULT hr = SHDoDragDrop(hwnd_, data.Get(), nullptr,
-                              DROPEFFECT_COPY | DROPEFFECT_MOVE | DROPEFFECT_LINK, &effect);
-    if (hr == DRAGDROP_S_DROP) {
-        alertActive_ = false;
-        MoodWithSound(Eyes::Mood::Happy, 1.4);  // teslim edildi
-    } else {
-        SetTimer(hwnd_, kTimerAlert, 3000, nullptr);
-    }
+    if (DragFiles({cardPath_})) alertActive_ = false;
+    else SetTimer(hwnd_, kTimerAlert, 3000, nullptr);
     Update();
+}
+
+IWICImagingFactory* Island::Wic() {
+    if (!wic_)
+        CoCreateInstance(CLSID_WICImagingFactory, nullptr, CLSCTX_INPROC_SERVER, IID_PPV_ARGS(&wic_));
+    return wic_.Get();
+}
+
+void Island::TakeScreenshot() {
+    // Windows'un kendi alan seçicisi; görüntü panoya gelince Guti kartı gösterir.
+    ShellExecuteW(nullptr, L"open", L"ms-screenclip:", nullptr, nullptr, SW_SHOWNORMAL);
+}
+
+bool Island::SaveClipboardImage() {
+    IWICImagingFactory* wic = Wic();
+    if (!wic) return false;
+    ComPtr<IWICBitmap> full;
+    if (!OpenClipboard(hwnd_)) return false;
+    if (auto hb = static_cast<HBITMAP>(GetClipboardData(CF_BITMAP)))
+        wic->CreateBitmapFromHBITMAP(hb, nullptr, WICBitmapIgnoreAlpha, &full);
+    CloseClipboard();
+    if (!full) return false;
+    UINT w = 0, h = 0;
+    full->GetSize(&w, &h);
+    if (w < 8 || h < 8) return false;
+
+    wchar_t tmp[MAX_PATH];
+    if (!GetTempPathW(MAX_PATH, tmp)) return false;
+    std::wstring dir = std::wstring(tmp) + L"Guti";
+    CreateDirectoryW(dir.c_str(), nullptr);
+    SYSTEMTIME st;
+    GetLocalTime(&st);
+    wchar_t name[64];
+    swprintf_s(name, L"\\Ekran %04d-%02d-%02d %02d.%02d.%02d.png", st.wYear, st.wMonth, st.wDay,
+               st.wHour, st.wMinute, st.wSecond);
+    std::wstring path = dir + name;
+
+    // PNG olarak kaydet: sürükleyip bırakmak için gerçek bir dosya gerekir.
+    ComPtr<IWICStream> stream;
+    ComPtr<IWICBitmapEncoder> enc;
+    ComPtr<IWICBitmapFrameEncode> frame;
+    ComPtr<IPropertyBag2> props;
+    bool ok = SUCCEEDED(wic->CreateStream(&stream)) &&
+              SUCCEEDED(stream->InitializeFromFilename(path.c_str(), GENERIC_WRITE)) &&
+              SUCCEEDED(wic->CreateEncoder(GUID_ContainerFormatPng, nullptr, &enc)) &&
+              SUCCEEDED(enc->Initialize(stream.Get(), WICBitmapEncoderNoCache)) &&
+              SUCCEEDED(enc->CreateNewFrame(&frame, &props)) && SUCCEEDED(frame->Initialize(props.Get()));
+    if (ok) {
+        WICPixelFormatGUID fmt = GUID_WICPixelFormat24bppBGR;
+        frame->SetSize(w, h);
+        frame->SetPixelFormat(&fmt);
+        ComPtr<IWICFormatConverter> conv;
+        ok = SUCCEEDED(wic->CreateFormatConverter(&conv)) &&
+             SUCCEEDED(conv->Initialize(full.Get(), fmt, WICBitmapDitherTypeNone, nullptr, 0,
+                                        WICBitmapPaletteTypeCustom)) &&
+             SUCCEEDED(frame->WriteSource(conv.Get(), nullptr)) && SUCCEEDED(frame->Commit()) &&
+             SUCCEEDED(enc->Commit());
+    }
+    stream.Reset();
+    if (!ok) {
+        DeleteFileW(path.c_str());
+        return false;
+    }
+
+    // Küçük önizleme: tam boy görüntüyü bellekte tutma.
+    float k = std::min(216.f / w, 144.f / h);
+    UINT tw = std::max(1u, static_cast<UINT>(w * k)), th = std::max(1u, static_cast<UINT>(h * k));
+    ComPtr<IWICBitmapScaler> scaler;
+    ComPtr<IWICFormatConverter> pconv;
+    shotThumb_.Reset();
+    shotBitmap_.Reset();
+    if (SUCCEEDED(wic->CreateBitmapScaler(&scaler)) &&
+        SUCCEEDED(scaler->Initialize(full.Get(), tw, th, WICBitmapInterpolationModeFant)) &&
+        SUCCEEDED(wic->CreateFormatConverter(&pconv)) &&
+        SUCCEEDED(pconv->Initialize(scaler.Get(), GUID_WICPixelFormat32bppPBGRA, WICBitmapDitherTypeNone,
+                                    nullptr, 0, WICBitmapPaletteTypeCustom)))
+        wic->CreateBitmapFromSource(pconv.Get(), WICBitmapCacheOnLoad, &shotThumb_);
+    cardPath_ = path;
+    return true;
+}
+
+void Island::DrawScreenshot(float w, float h) {
+    const float boxW = 108.f, boxH = 72.f, x0 = 12.f, y0 = (h - boxH) / 2;
+    if (!shotBitmap_ && shotThumb_) rt_->CreateBitmapFromWicBitmap(shotThumb_.Get(), nullptr, &shotBitmap_);
+    if (shotBitmap_) {
+        D2D1_SIZE_F bs = shotBitmap_->GetSize();
+        float k = std::min(boxW / bs.width, boxH / bs.height);
+        float dw = bs.width * k, dh = bs.height * k;
+        D2D1_RECT_F r = D2D1::RectF(x0 + (boxW - dw) / 2, y0 + (boxH - dh) / 2, x0 + (boxW + dw) / 2,
+                                    y0 + (boxH + dh) / 2);
+        ComPtr<ID2D1BitmapBrush> bb;
+        rt_->CreateBitmapBrush(shotBitmap_.Get(), &bb);
+        if (bb) {
+            bb->SetTransform(D2D1::Matrix3x2F::Scale(k, k) * D2D1::Matrix3x2F::Translation(r.left, r.top));
+            bb->SetInterpolationMode(D2D1_BITMAP_INTERPOLATION_MODE_LINEAR);
+            rt_->FillRoundedRectangle(D2D1_ROUNDED_RECT{r, 8, 8}, bb.Get());
+        }
+        brush_->SetColor(Rgba(1, 1, 1, 0.18f));
+        rt_->DrawRoundedRectangle(D2D1_ROUNDED_RECT{r, 8, 8}, brush_.Get(), 1.f);
+    }
+    float tx = x0 + boxW + 14;
+    Text(L"Ekran görüntüsü", fAlert_.Get(), D2D1::RectF(tx, h / 2 - 22, w - 20, h / 2 + 2), kWhite);
+    Text(L"sürükle bırak · tıkla: aç", fSmall_.Get(), D2D1::RectF(tx, h / 2 + 2, w - 20, h / 2 + 20), kGray);
+}
+
+void Island::DrawDrop(float w, float h) {
+    eyes_.Draw(rt_.Get(), d2d_.Get(), brush_.Get(), roundStroke_.Get(), 34, h / 2, 0.85f, 0.f);
+    Text(L"Bırak, Guti tutsun", fAlert_.Get(), D2D1::RectF(66, 0, w - 16, h), kWhite);
+}
+
+void Island::OnDropEnter() {
+    dropHover_ = true;
+    eyes_.SetMood(Eyes::Mood::Cute, Now(), 0);  // kocaman gözlerle bekler
+    Sounds::Play(Sounds::Sound::Open);
+    Update();
+}
+
+void Island::OnDropLeave() {
+    dropHover_ = false;
+    dropArmed_ = false;
+    eyes_.SetMood(Eyes::Mood::Normal, Now(), 0);
+    Update();
+}
+
+void Island::OnDropFiles(const std::vector<std::wstring>& paths) {
+    dropHover_ = false;
+    dropArmed_ = false;
+    for (const auto& p : paths) {
+        auto it = std::find_if(shelf_.begin(), shelf_.end(), [&](const ShelfItem& s) { return s.path == p; });
+        if (it == shelf_.end()) shelf_.push_back({p, nullptr});
+    }
+    if (shelf_.size() > static_cast<size_t>(kShelfMax))
+        shelf_.erase(shelf_.begin(), shelf_.end() - kShelfMax);
+    eyes_.SetMood(Eyes::Mood::Normal, Now(), 0);
+    MoodWithSound(Eyes::Mood::Happy, 1.6);  // "tamam, bende!"
+    height_.velocity += 120.f;
+    lastActivity_ = Now();
+    Update();
+}
+
+bool Island::ShelfVisible() const { return !shelf_.empty(); }
+
+float Island::ShelfTop() const {
+    return view_ == View::ExpandedMedia ? kExpandedMedia.h : kExpandedIdle.h;
+}
+
+int Island::ShelfHit(float x, float y) const {
+    if (!ShelfVisible() || (view_ != View::ExpandedIdle && view_ != View::ExpandedMedia)) return -1;
+    float top = ShelfTop();
+    if (y < top - 4 || y > top + kShelfH) return -1;
+    if (x > width_.value - 40) return -2;  // temizle
+    int i = static_cast<int>((x - 18) / kShelfCell);
+    int shown = std::min<int>(static_cast<int>(shelf_.size()), kShelfShown);
+    return x >= 18 && i < shown ? i : -1;
+}
+
+ID2D1Bitmap* Island::ShelfIcon(size_t i) {
+    ShelfItem& it = shelf_[i];
+    if (it.icon) return it.icon.Get();
+    IWICImagingFactory* wic = Wic();
+    SHFILEINFOW sfi{};
+    if (!wic || !SHGetFileInfoW(it.path.c_str(), 0, &sfi, sizeof(sfi), SHGFI_ICON | SHGFI_LARGEICON) ||
+        !sfi.hIcon)
+        return nullptr;
+    ComPtr<IWICBitmap> wb;
+    wic->CreateBitmapFromHICON(sfi.hIcon, &wb);
+    DestroyIcon(sfi.hIcon);
+    ComPtr<IWICFormatConverter> conv;
+    if (wb && SUCCEEDED(wic->CreateFormatConverter(&conv)) &&
+        SUCCEEDED(conv->Initialize(wb.Get(), GUID_WICPixelFormat32bppPBGRA, WICBitmapDitherTypeNone,
+                                   nullptr, 0, WICBitmapPaletteTypeCustom)))
+        rt_->CreateBitmapFromWicBitmap(conv.Get(), nullptr, &it.icon);
+    return it.icon.Get();
+}
+
+void Island::DrawShelf(float w) {
+    float top = ShelfTop();
+    brush_->SetColor(Rgba(1, 1, 1, 0.08f));
+    rt_->FillRectangle(D2D1::RectF(18, top - 2, w - 18, top - 1), brush_.Get());
+    int shown = std::min<int>(static_cast<int>(shelf_.size()), kShelfShown);
+    for (int i = 0; i < shown; ++i) {
+        float cx = 18 + i * kShelfCell + kShelfCell / 2;
+        if (ID2D1Bitmap* icon = ShelfIcon(static_cast<size_t>(i)))
+            rt_->DrawBitmap(icon, D2D1::RectF(cx - 14, top + 4, cx + 14, top + 32));
+        const std::wstring& p = shelf_[static_cast<size_t>(i)].path;
+        size_t slash = p.find_last_of(L'\\');
+        std::wstring name = slash == std::wstring::npos ? p : p.substr(slash + 1);
+        Text(name.c_str(), fSmallCenter_.Get(),
+             D2D1::RectF(cx - kShelfCell / 2 + 2, top + 34, cx + kShelfCell / 2 - 2, top + 50), kGray);
+    }
+    if (static_cast<int>(shelf_.size()) > shown) {
+        wchar_t more[16];
+        swprintf_s(more, L"+%d", static_cast<int>(shelf_.size()) - shown);
+        float x = 18 + shown * kShelfCell;
+        Text(more, fAlert_.Get(), D2D1::RectF(x, top + 4, x + 40, top + 32), kGray);
+    }
+    Text(kGlyphClose, fIconSmall_.Get(), D2D1::RectF(w - 40, top + 4, w - 16, top + 32), kGray);
 }
 
 // ---------------------------------------------------------------------------
@@ -1563,6 +1891,20 @@ void Island::OnLookTimer() {
     bool over = pt.x >= cx - halfW - pad && pt.x <= cx + halfW + pad && pt.y >= monitor_.top &&
                 pt.y <= top + height_.value * scale_ + pad;
     bool buttonDown = (GetAsyncKeyState(VK_LBUTTON) & 0x8000) || (GetAsyncKeyState(VK_RBUTTON) & 0x8000);
+
+    // Dosya rafı: başka yerde basılıp adaya doğru sürükleniyorsa ada bırakmaya hazırlanır.
+    // (Adanın üstünde basılan tık ise alttaki sekmeye aittir, ona dokunma.)
+    bool leftDown = (GetAsyncKeyState(VK_LBUTTON) & 0x8000) != 0;
+    if (leftDown && !lastLeftDown_) downStartedOver_ = over;
+    lastLeftDown_ = leftDown;
+    float dropPad = 36.f * scale_;
+    bool nearDrop = pt.x >= cx - halfW - dropPad && pt.x <= cx + halfW + dropPad && pt.y >= monitor_.top &&
+                    pt.y <= top + height_.value * scale_ + dropPad;
+    bool arm = leftDown && !downStartedOver_ && nearDrop && !commandMode_;
+    if (arm != dropArmed_ && !dropHover_) {
+        dropArmed_ = arm;
+        Update();
+    }
     if (!hover_) {
         if (over && !buttonDown) {
             if (hoverSince_ == 0) {
@@ -1637,6 +1979,8 @@ void Island::ShowTrayMenu() {
     wchar_t focusLabel[64];
     swprintf_s(focusLabel, L"Odak modu başlat (%d dk)", Companion::kFocusMinutes);
     AppendMenuW(menu, MF_STRING, kCmdCommand, L"Hesap · çevir · hatırlat · pano\tCtrl+Alt+Boşluk");
+    AppendMenuW(menu, MF_STRING, kCmdShot, L"Ekran görüntüsü al\tCtrl+Alt+S");
+    if (!shelf_.empty()) AppendMenuW(menu, MF_STRING, kCmdClearShelf, L"Rafı boşalt");
     AppendMenuW(menu, MF_STRING, kCmdFocus, focusing ? L"Odak modunu bitir" : focusLabel);
     if (companion_.Kind() == Companion::TimerKind::Quick)
         AppendMenuW(menu, MF_STRING, kCmdCancelTimer, L"Zamanlayıcıyı iptal et");
@@ -1676,6 +2020,11 @@ void Island::ShowTrayMenu() {
         if (userHidden_) ToggleUserHidden();  // ilerlemeyi adada göster
         ShowAlert(AlertKind::Updating, availableVersion_, 0);
         Updater::CheckAsync(hwnd_, true);
+    }
+    if (cmd == kCmdShot) TakeScreenshot();
+    if (cmd == kCmdClearShelf) {
+        shelf_.clear();
+        Update();
     }
     if (cmd == kCmdCommand) {
         if (userHidden_) ToggleUserHidden();
@@ -1735,18 +2084,43 @@ LRESULT Island::WndProc(UINT msg, WPARAM wp, LPARAM lp) {
         return MA_NOACTIVATE;  // tıklayınca açık uygulamanın odağını çalma
 
     case WM_LBUTTONDOWN:
-        if (IsDownloadAlert()) {
-            // Basılı tutup çekersen dosya sürüklenir; sadece tıklarsan klasörde gösterilir.
+        if (IsFileCard()) {
+            // Basılı tutup çekersen dosya sürüklenir; sadece tıklarsan açılır.
             POINT pt{GET_X_LPARAM(lp), GET_Y_LPARAM(lp)};
             ClientToScreen(hwnd_, &pt);
             swallowUpUntil_ = Now() + 1.0;
-            if (DragDetect(hwnd_, pt)) StartDownloadDrag();
-            else OpenDownloadFolder();
+            if (DragDetect(hwnd_, pt)) StartCardDrag();
+            else OpenCard();
+            return 0;
+        }
+        if (int hit = ShelfHit(GET_X_LPARAM(lp) / scale_, GET_Y_LPARAM(lp) / scale_); hit != -1) {
+            swallowUpUntil_ = Now() + 1.0;
+            if (hit == -2) {
+                shelf_.clear();  // rafı boşalt
+                MoodWithSound(Eyes::Mood::Wink, 0.8);
+                Update();
+                return 0;
+            }
+            POINT pt{GET_X_LPARAM(lp), GET_Y_LPARAM(lp)};
+            ClientToScreen(hwnd_, &pt);
+            std::wstring path = shelf_[static_cast<size_t>(hit)].path;
+            if (DragDetect(hwnd_, pt)) {
+                // Raftan çekip bırakınca dosya raftan iner.
+                if (DragFiles({path})) {
+                    auto it = std::find_if(shelf_.begin(), shelf_.end(),
+                                           [&](const ShelfItem& s) { return s.path == path; });
+                    if (it != shelf_.end()) shelf_.erase(it);
+                }
+            } else {
+                AllowSetForegroundWindow(ASFW_ANY);
+                ShellExecuteW(nullptr, L"open", path.c_str(), nullptr, nullptr, SW_SHOWNORMAL);
+            }
+            Update();
         }
         return 0;
 
     case WM_LBUTTONUP:
-        if (IsDownloadAlert() || Now() < swallowUpUntil_) {
+        if (IsFileCard() || Now() < swallowUpUntil_) {
             swallowUpUntil_ = 0;
             return 0;
         }
@@ -1796,7 +2170,7 @@ LRESULT Island::WndProc(UINT msg, WPARAM wp, LPARAM lp) {
             break;
         case kTimerAlert:
             KillTimer(hwnd_, kTimerAlert);
-            if (IsDownloadAlert() && hover_) {
+            if (IsFileCard() && hover_) {
                 SetTimer(hwnd_, kTimerAlert, 1500, nullptr);  // üstündeyken bekle
                 break;
             }
@@ -1895,6 +2269,7 @@ LRESULT Island::WndProc(UINT msg, WPARAM wp, LPARAM lp) {
 
     case WM_HOTKEY:
         if (wp == kHotkeyToggle) ToggleUserHidden();
+        if (wp == kHotkeyShot) TakeScreenshot();
         if (wp == kHotkeyCommand) {
             if (commandMode_) {
                 CloseCommand(true);
@@ -1942,6 +2317,10 @@ LRESULT Island::WndProc(UINT msg, WPARAM wp, LPARAM lp) {
         RemoveClipboardFormatListener(hwnd_);
         UnregisterHotKey(hwnd_, kHotkeyToggle);
         UnregisterHotKey(hwnd_, kHotkeyCommand);
+        UnregisterHotKey(hwnd_, kHotkeyShot);
+        RevokeDragDrop(hwnd_);
+        if (dropTarget_) dropTarget_->Release();
+        dropTarget_ = nullptr;
         NOTIFYICONDATAW nid{sizeof(nid)};
         nid.hWnd = hwnd_;
         nid.uID = kTrayId;
