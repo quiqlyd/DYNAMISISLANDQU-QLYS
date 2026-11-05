@@ -27,6 +27,10 @@ public:
         Glance,     // etrafa bakınma
         Dizzy,      // > <
         Sleepy,     // kapalı gözler
+        Yawn,       // esneme (uzun çalışınca)
+        Sulk,       // küsme: başını çevirir
+        Focused,    // odak modu: ciddi bakış
+        Sweaty,     // ter damlası (bilgisayar zorlanınca)
         Count
     };
 
@@ -37,6 +41,8 @@ public:
     void SetMood(Mood mood, double now, double duration);  // duration <= 0: süresiz
     Mood CurrentMood() const { return mood_; }
     bool IsAwake() const { return mood_ != Mood::Sleepy; }
+    // Dostluk puanı (0-100): kendi kendine şirinliklerin sıklığını ve türünü belirler.
+    void SetAffection(int a) { affection_ = a; }
 
     // Yavaş zamanlayıcıdan çağrılır (100 ms). Bir animasyon başlatmak gerekiyorsa true.
     bool Tick(double now);
@@ -60,6 +66,7 @@ private:
         float wink;       // sağ göz kırpık
         float sparkle;    // göz parıltısı
         float asym;       // + sol göz büyük, sağ göz küçük
+        float sweat;      // ter damlası
         bool follow;      // fareyi takip etsin mi
         bool blinks;      // kendi kendine kırpsın mı
         bool animated;    // sürekli kare ister (zıplama, bakınma)
@@ -68,7 +75,8 @@ private:
     void UpdateTargets(double now);
 
     Spring lookX_, lookY_, open_, lidTop_, brow_, lidBottom_, happy_, heart_, blush_, tear_,
-        wink_, sparkle_, asym_, dizzy_;
+        wink_, sparkle_, asym_, dizzy_, sweat_;
+    int affection_ = 50;
     Mood mood_ = Mood::Normal;
     double moodStart_ = 0;
     double moodUntil_ = 0;

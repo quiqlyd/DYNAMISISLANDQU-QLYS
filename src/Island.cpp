@@ -1,4 +1,5 @@
 #include "Island.h"
+#include "Sounds.h"
 #include "Updater.h"
 
 #include <objbase.h>
@@ -33,6 +34,9 @@ constexpr UINT kCmdAutostart = 100;
 constexpr UINT kCmdExit = 101;
 constexpr UINT kCmdToggle = 102;
 constexpr UINT kCmdUpdate = 103;
+constexpr UINT kCmdSounds = 104;
+constexpr UINT kCmdFocus = 105;
+constexpr UINT kCmdCancelTimer = 106;
 constexpr wchar_t kSettingsKey[] = L"Software\\DynamisIsland";
 
 constexpr float kTopMargin = 4.f;
@@ -45,6 +49,7 @@ constexpr Size3 kMedia{236, 34, 17};
 constexpr Size3 kExpandedMedia{400, 164, 40};
 constexpr Size3 kExpandedIdle{320, 96, 36};
 constexpr Size3 kAlert{300, 40, 20};
+constexpr Size3 kTimer{128, 24, 12};
 
 // Segoe Fluent Icons
 constexpr wchar_t kGlyphPrev[] = L"\xE892";
@@ -56,6 +61,7 @@ constexpr wchar_t kGlyphBolt[] = L"\xE945";
 constexpr wchar_t kGlyphSync[] = L"\xE895";
 constexpr wchar_t kGlyphCheck[] = L"\xE73E";
 constexpr wchar_t kGlyphError[] = L"\xE783";
+constexpr wchar_t kGlyphTimer[] = L"\xE916";
 
 constexpr wchar_t kRunKey[] = L"Software\\Microsoft\\Windows\\CurrentVersion\\Run";
 constexpr wchar_t kRunValue[] = L"DynamisIsland";
@@ -67,6 +73,7 @@ const D2D1_COLOR_F kWhite = Rgba(1, 1, 1);
 const D2D1_COLOR_F kGray = Rgba(1, 1, 1, 0.55f);
 const D2D1_COLOR_F kGreen = Rgba(0.30f, 0.85f, 0.42f);
 const D2D1_COLOR_F kRed = Rgba(1.f, 0.30f, 0.27f);
+const D2D1_COLOR_F kOrange = Rgba(1.f, 0.62f, 0.25f);
 
 std::wstring FormatClock(const SYSTEMTIME& st) {
     wchar_t buf[64];
@@ -187,6 +194,15 @@ bool Island::Create(HINSTANCE instance) {
 
     media_.Start(hwnd_, wic_.Get());
     OnPowerChanged(true);
+    Sounds::SetEnabled(ReadSetting(L"Sounds", 1) != 0);
+    companion_.Load();
+    eyes_.SetAffection(companion_.Affection());
+    if (companion_.DaysAway() >= 2) {
+        eyes_.SetMood(Eyes::Mood::Sulk, Now(), 3.0);  // "neredeydin?"
+        reunionAt_ = Now() + 3.2;
+    } else {
+        eyes_.SetMood(Eyes::Mood::Happy, Now(), 1.2);
+    }
     AddTrayIcon();
 
     SetTimer(hwnd_, kTimerTick, 1000, nullptr);
@@ -254,7 +270,12 @@ void Island::UpdateDpi(UINT dpi) {
 
 Island::View Island::TargetView() const {
     if (alertActive_) return View::Alert;
-    if (hover_) return snapshot_.hasSession ? View::ExpandedMedia : View::ExpandedIdle;
+    bool timer = companion_.TimerActive() || companion_.Pending();
+    if (hover_) {
+        if (companion_.Pending()) return View::ExpandedIdle;  // teker çevrilirken süreyi göster
+        return snapshot_.hasSession ? View::ExpandedMedia : View::ExpandedIdle;
+    }
+    if (timer) return View::Timer;
     return snapshot_.hasSession ? View::Media : View::Idle;
 }
 
@@ -266,6 +287,7 @@ void Island::SetTargets(View v) {
     case View::ExpandedMedia: s = kExpandedMedia; break;
     case View::ExpandedIdle: s = kExpandedIdle; break;
     case View::Alert: s = kAlert; break;
+    case View::Timer: s = kTimer; break;
     }
     width_.target = s.w;
     height_.target = s.h;
@@ -353,12 +375,31 @@ void Island::ShowAlert(AlertKind kind, int value, UINT durationMs) {
     else KillTimer(hwnd_, kTimerAlert);
     double now = Now();
     lastActivity_ = now;
-    if (kind == AlertKind::Charging) eyes_.SetMood(Eyes::Mood::Love, now, 4.5);
-    if (kind == AlertKind::Unplugged) eyes_.SetMood(Eyes::Mood::Sad, now, 2.5);
-    if (kind == AlertKind::LowBattery) eyes_.SetMood(Eyes::Mood::Sad, now, 4.5);
-    if (kind == AlertKind::UpToDate || kind == AlertKind::UpdateAvailable)
-        eyes_.SetMood(Eyes::Mood::Happy, now, 4.0);
-    if (kind == AlertKind::UpdateFailed) eyes_.SetMood(Eyes::Mood::Dizzy, now, 2.0);
+    (void)now;
+    switch (kind) {
+    case AlertKind::Charging: MoodWithSound(Eyes::Mood::Love, 4.5); break;
+    case AlertKind::Unplugged: MoodWithSound(Eyes::Mood::Sad, 2.5); break;
+    case AlertKind::LowBattery: MoodWithSound(Eyes::Mood::Sad, 4.5); break;
+    case AlertKind::UpToDate:
+    case AlertKind::UpdateAvailable: MoodWithSound(Eyes::Mood::Happy, 4.0); break;
+    case AlertKind::UpdateFailed: MoodWithSound(Eyes::Mood::Dizzy, 2.0); break;
+    case AlertKind::TimerDone:
+        eyes_.SetMood(Eyes::Mood::Surprised, now, 1.2);
+        Sounds::Play(Sounds::Sound::TimerDone);
+        height_.velocity += 120.f;
+        break;
+    case AlertKind::FocusDone:
+        eyes_.SetMood(Eyes::Mood::Yawn, now, 2.5);  // gerinir
+        Sounds::Play(Sounds::Sound::TimerDone);
+        height_.velocity += 140.f;
+        break;
+    case AlertKind::BreakDone:
+        eyes_.SetMood(Eyes::Mood::Happy, now, 2.0);
+        Sounds::Play(Sounds::Sound::TimerDone);
+        height_.velocity += 100.f;
+        break;
+    default: break;
+    }
     Update();
 }
 
@@ -540,6 +581,7 @@ void Island::Render() {
     case View::ExpandedMedia: DrawExpandedMedia(w, h); break;
     case View::ExpandedIdle: DrawExpandedIdle(w, h); break;
     case View::Alert: DrawAlert(w, h); break;
+    case View::Timer: DrawTimer(w, h); break;
     }
     if (layer && clip) rt_->PopLayer();
 
@@ -674,7 +716,10 @@ void Island::DrawExpandedIdle(float w, float h) {
     SYSTEMTIME st;
     GetLocalTime(&st);
     Text(FormatClock(st).c_str(), fBigClock_.Get(), D2D1::RectF(26, 10, w - 150, 56), kWhite);
-    Text(FormatDate(st).c_str(), fDate_.Get(), D2D1::RectF(28, 56, w - 150, 80), kGray);
+    if (companion_.Pending() || companion_.TimerActive())
+        Text(TimerText().c_str(), fDate_.Get(), D2D1::RectF(28, 56, w - 150, 80), TimerColor());
+    else
+        Text(FormatDate(st).c_str(), fDate_.Get(), D2D1::RectF(28, 56, w - 150, 80), kGray);
     eyes_.Draw(rt_.Get(), d2d_.Get(), brush_.Get(), roundStroke_.Get(), w - 128, h / 2, 1.6f, 0.f);
 
     SYSTEM_POWER_STATUS ps{};
@@ -689,6 +734,56 @@ void Island::DrawExpandedIdle(float w, float h) {
     }
 }
 
+std::wstring Island::TimerText() const {
+    wchar_t buf[64];
+    if (companion_.Pending()) {
+        swprintf_s(buf, L"Zamanlayıcı: %d dk", companion_.PendingMinutes());
+        return buf;
+    }
+    int sec = static_cast<int>(companion_.Remaining(Now()) + 0.999);
+    const wchar_t* label = L"";
+    switch (companion_.Kind()) {
+    case Companion::TimerKind::Focus: label = L"Odak · "; break;
+    case Companion::TimerKind::Break: label = L"Mola · "; break;
+    default: break;
+    }
+    if (sec >= 3600)
+        swprintf_s(buf, L"%s%d:%02d:%02d", label, sec / 3600, (sec / 60) % 60, sec % 60);
+    else
+        swprintf_s(buf, L"%s%d:%02d", label, sec / 60, sec % 60);
+    return buf;
+}
+
+D2D1_COLOR_F Island::TimerColor() const {
+    switch (companion_.Kind()) {
+    case Companion::TimerKind::Focus: return kOrange;
+    case Companion::TimerKind::Break: return kGreen;
+    default: return companion_.Pending() ? accent_ : kWhite;
+    }
+}
+
+void Island::DrawTimer(float w, float h) {
+    // Küçük gözler solda, kalan süre sağda, altta ince ilerleme çizgisi.
+    eyes_.Draw(rt_.Get(), d2d_.Get(), brush_.Get(), roundStroke_.Get(), 26, h / 2, 0.62f, 0.f);
+    std::wstring t;
+    if (companion_.Pending()) {
+        wchar_t buf[16];
+        swprintf_s(buf, L"%d dk", companion_.PendingMinutes());
+        t = buf;
+    } else {
+        int sec = static_cast<int>(companion_.Remaining(Now()) + 0.999);
+        wchar_t buf[16];
+        swprintf_s(buf, L"%d:%02d", sec / 60, sec % 60);
+        t = buf;
+    }
+    Text(t.c_str(), fTinyRight_.Get(), D2D1::RectF(44, 0, w - 12, h), TimerColor());
+    if (companion_.TimerActive() && companion_.Total() > 0 && !companion_.Pending()) {
+        float frac = static_cast<float>(companion_.Remaining(Now()) / companion_.Total());
+        brush_->SetColor(WithAlpha(TimerColor(), 0.8f));
+        rt_->FillRectangle(D2D1::RectF(h / 2, h - 2.f, h / 2 + (w - h) * frac, h - 0.5f), brush_.Get());
+    }
+}
+
 void Island::DrawAlert(float w, float h) {
     if (alertKind_ >= AlertKind::UpdateAvailable) {
         const wchar_t* glyph = kGlyphSync;
@@ -699,6 +794,9 @@ void Island::DrawAlert(float w, float h) {
         case AlertKind::Updating: label = L"Güncelleniyor..."; break;
         case AlertKind::UpToDate: label = L"En güncel sürüm"; glyph = kGlyphCheck; color = kGreen; break;
         case AlertKind::UpdateFailed: label = L"Güncelleme başarısız"; glyph = kGlyphError; color = kRed; break;
+        case AlertKind::TimerDone: label = L"Süre doldu!"; glyph = kGlyphTimer; color = kWhite; break;
+        case AlertKind::FocusDone: label = L"Odak bitti, mola zamanı"; glyph = kGlyphTimer; color = kGreen; break;
+        case AlertKind::BreakDone: label = L"Mola bitti, hadi devam"; glyph = kGlyphTimer; color = kOrange; break;
         default: break;
         }
         Text(glyph, fIcon_.Get(), D2D1::RectF(12, 0, 40, h), color);
@@ -708,7 +806,8 @@ void Island::DrawAlert(float w, float h) {
             swprintf_s(buf, L"hata %d", alertValue_);
         else
             swprintf_s(buf, L"v%d", alertValue_);
-        if (alertValue_ > 0) Text(buf, fAlertRight_.Get(), D2D1::RectF(w - 80, 0, w - 18, h), color);
+        bool showValue = alertValue_ > 0 && alertKind_ <= AlertKind::UpdateFailed;
+        if (showValue) Text(buf, fAlertRight_.Get(), D2D1::RectF(w - 80, 0, w - 18, h), color);
         return;
     }
     SYSTEM_POWER_STATUS ps{};
@@ -765,7 +864,8 @@ double Island::Now() const {
 }
 
 bool Island::ViewShowsEyes() const {
-    return view_ == View::Idle || view_ == View::Media || view_ == View::ExpandedIdle;
+    return view_ == View::Idle || view_ == View::Media || view_ == View::ExpandedIdle ||
+           view_ == View::Timer;
 }
 
 void Island::Pet() {
@@ -774,27 +874,92 @@ void Island::Pet() {
     lastActivity_ = now;
     clickStreak_ = (now - lastClick_ < 0.7) ? clickStreak_ + 1 : 1;
     lastClick_ = now;
+    companion_.OnPet(now);
+    eyes_.SetAffection(companion_.Affection());
 
     using M = Eyes::Mood;
     if (clickStreak_ >= 8) {
-        eyes_.SetMood(M::Dizzy, now, 2.0);  // başı döndü
+        MoodWithSound(M::Dizzy, 2.0);  // başı döndü
         shake_.velocity += 420.f;
         clickStreak_ = 0;
     } else if (clickStreak_ >= 5) {
-        eyes_.SetMood(M::Angry, now, 2.2);  // "yeter!"
+        MoodWithSound(M::Angry, 2.2);  // "yeter!"
         shake_.velocity += 300.f;
     } else if (clickStreak_ == 4) {
-        eyes_.SetMood(M::Love, now, 2.6);
+        MoodWithSound(M::Love, 2.6);
         height_.velocity += 60.f;
     } else if (clickStreak_ == 3) {
-        eyes_.SetMood(M::Laugh, now, 1.8);  // gıdıklandı
+        MoodWithSound(M::Laugh, 1.8);  // gıdıklandı
         height_.velocity += 80.f;
     } else {
         eyes_.SetMood(M::Happy, now, 1.4);
+        Sounds::Play(Sounds::Sound::Pet);
         height_.velocity += 70.f;  // sevinçle zıplar
         width_.velocity += 50.f;
     }
     StartAnimation();
+}
+
+void Island::MoodWithSound(Eyes::Mood mood, double duration) {
+    using M = Eyes::Mood;
+    eyes_.SetMood(mood, Now(), duration);
+    switch (mood) {
+    case M::Happy: case M::Cute: Sounds::Play(Sounds::Sound::Happy); break;
+    case M::Laugh: Sounds::Play(Sounds::Sound::Laugh); break;
+    case M::Love: Sounds::Play(Sounds::Sound::Love); break;
+    case M::Angry: case M::Dizzy: case M::Sulk: Sounds::Play(Sounds::Sound::Angry); break;
+    case M::Sad: Sounds::Play(Sounds::Sound::Sad); break;
+    case M::Yawn: Sounds::Play(Sounds::Sound::Yawn); break;
+    default: break;
+    }
+    StartAnimation();
+}
+
+void Island::SetHover(bool hover) {
+    if (hover == hover_) return;
+    hover_ = hover;
+    Sounds::Play(hover ? Sounds::Sound::Open : Sounds::Sound::Close);
+}
+
+void Island::OnCompanionTick() {
+    double now = Now();
+    using E = Companion::Event;
+    using M = Eyes::Mood;
+    switch (companion_.Tick(now)) {
+    case E::TimerStarted:
+        if (companion_.Kind() == Companion::TimerKind::Focus) eyes_.SetMood(M::Focused, now, 0);
+        else MoodWithSound(M::Happy, 1.0);
+        break;
+    case E::TimerDone: ShowAlert(AlertKind::TimerDone, 0, 5000); break;
+    case E::FocusDone: ShowAlert(AlertKind::FocusDone, 0, 5000); break;
+    case E::BreakDone: ShowAlert(AlertKind::BreakDone, 0, 5000); break;
+    case E::Distracted:
+        // "Hani odaklanıyorduk?" — kaşlarını çatar ve hafifçe sallanır.
+        MoodWithSound(M::Angry, 2.5);
+        shake_.velocity += 260.f;
+        break;
+    case E::NeedBreak:
+        // Bir saattir aralıksız çalışıyorsun: Guti esneyip gerinir.
+        MoodWithSound(M::Yawn, 3.0);
+        height_.velocity += 150.f;
+        lastActivity_ = now;
+        break;
+    case E::None: break;
+    }
+
+    // Odak sürerken Guti'nin varsayılan yüzü ciddi; bitince normale döner.
+    bool focus = companion_.Kind() == Companion::TimerKind::Focus;
+    if (focus && eyes_.CurrentMood() == M::Normal) eyes_.SetMood(M::Focused, now, 0);
+    if (!focus && eyes_.CurrentMood() == M::Focused) eyes_.SetMood(M::Normal, now, 0);
+
+    // Uzun ayrılıktan sonra: önce küser, sonra dayanamayıp sevinir.
+    if (reunionAt_ > 0 && now >= reunionAt_) {
+        reunionAt_ = 0;
+        MoodWithSound(M::Love, 2.5);
+        height_.velocity += 100.f;
+        StartAnimation();
+    }
+    if (TargetView() != view_) Update();
 }
 
 void Island::OnLookTimer() {
@@ -841,7 +1006,7 @@ void Island::OnLookTimer() {
                 if (eyes_.CurrentMood() == Eyes::Mood::Normal || eyes_.CurrentMood() == Eyes::Mood::Sleepy)
                     eyes_.SetMood(Eyes::Mood::Surprised, now, 0.45);
             } else if (now - hoverSince_ >= 0.45) {
-                hover_ = true;
+                SetHover(true);
                 if (!snapshot_.hasSession) eyes_.SetMood(Eyes::Mood::Cute, now, 1.2);  // "merhaba!"
                 hoverSince_ = 0;
                 outsideSince_ = 0;
@@ -856,7 +1021,7 @@ void Island::OnLookTimer() {
         } else if (outsideSince_ == 0) {
             outsideSince_ = now;
         } else if (now - outsideSince_ >= 0.35) {
-            hover_ = false;
+            SetHover(false);
             outsideSince_ = 0;
             Update();
         }
@@ -885,7 +1050,8 @@ void Island::AddTrayIcon() {
 void Island::ShowTrayMenu() {
     HMENU menu = CreatePopupMenu();
     wchar_t title[64];
-    swprintf_s(title, L"Dynamis Island  v%d", Updater::kCurrentVersion);
+    swprintf_s(title, L"Guti  v%d   ·   dostluk %d/100", Updater::kCurrentVersion,
+               companion_.Affection());
     AppendMenuW(menu, MF_STRING | MF_GRAYED, 0, title);
     AppendMenuW(menu, MF_SEPARATOR, 0, nullptr);
     AppendMenuW(menu, MF_STRING, kCmdToggle,
@@ -899,7 +1065,15 @@ void Island::ShowTrayMenu() {
         swprintf_s(updateLabel, L"Güncelleştir (v%d hazır)", availableVersion_);
     else
         wcscpy_s(updateLabel, L"Güncelleştir");
+    AppendMenuW(settings, MF_STRING | (Sounds::Enabled() ? MF_CHECKED : 0), kCmdSounds, L"Sesler");
     AppendMenuW(settings, MF_STRING, kCmdUpdate, updateLabel);
+    bool focusing = companion_.Kind() == Companion::TimerKind::Focus ||
+                    companion_.Kind() == Companion::TimerKind::Break;
+    wchar_t focusLabel[64];
+    swprintf_s(focusLabel, L"Odak modu başlat (%d dk)", Companion::kFocusMinutes);
+    AppendMenuW(menu, MF_STRING, kCmdFocus, focusing ? L"Odak modunu bitir" : focusLabel);
+    if (companion_.Kind() == Companion::TimerKind::Quick)
+        AppendMenuW(menu, MF_STRING, kCmdCancelTimer, L"Zamanlayıcıyı iptal et");
     AppendMenuW(menu, MF_POPUP, reinterpret_cast<UINT_PTR>(settings), L"Ayarlar");
 
     AppendMenuW(menu, MF_SEPARATOR, 0, nullptr);
@@ -912,6 +1086,26 @@ void Island::ShowTrayMenu() {
     DestroyMenu(menu);
     if (cmd == kCmdAutostart) SetAutostart(!IsAutostartEnabled());
     if (cmd == kCmdToggle) ToggleUserHidden();
+    if (cmd == kCmdSounds) {
+        Sounds::SetEnabled(!Sounds::Enabled());
+        WriteSetting(L"Sounds", Sounds::Enabled() ? 1 : 0);
+        Sounds::Play(Sounds::Sound::Pet);
+    }
+    if (cmd == kCmdFocus) {
+        if (companion_.Kind() == Companion::TimerKind::Focus ||
+            companion_.Kind() == Companion::TimerKind::Break) {
+            companion_.CancelTimer();
+        } else {
+            companion_.StartTimer(Companion::TimerKind::Focus, Companion::kFocusMinutes, Now());
+            eyes_.SetMood(Eyes::Mood::Focused, Now(), 0);
+            Sounds::Play(Sounds::Sound::Pet);
+        }
+        Update();
+    }
+    if (cmd == kCmdCancelTimer) {
+        companion_.CancelTimer();
+        Update();
+    }
     if (cmd == kCmdUpdate) {
         if (userHidden_) ToggleUserHidden();  // ilerlemeyi adada göster
         ShowAlert(AlertKind::Updating, availableVersion_, 0);
@@ -1000,13 +1194,15 @@ LRESULT Island::WndProc(UINT msg, WPARAM wp, LPARAM lp) {
             break;
         case kTimerTick: {
             CheckFullscreen();
+            OnCompanionTick();
             if (!hidden_) {
                 SetWindowPos(hwnd_, HWND_TOPMOST, 0, 0, 0, 0,
                              SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE | SWP_NOOWNERZORDER);
                 SYSTEMTIME st;
                 GetLocalTime(&st);
                 bool showsClock = view_ == View::Idle || view_ == View::ExpandedIdle;
-                bool showsProgress = view_ == View::ExpandedMedia;
+                bool showsProgress = view_ == View::ExpandedMedia || view_ == View::Timer ||
+                                     (view_ == View::ExpandedIdle && companion_.TimerActive());
                 if ((showsClock && st.wMinute != lastMinute_) || showsProgress) {
                     if (!animating_) Render();
                 }
@@ -1066,6 +1262,19 @@ LRESULT Island::WndProc(UINT msg, WPARAM wp, LPARAM lp) {
         if (LOWORD(lp) == WM_LBUTTONUP) ToggleUserHidden();
         return 0;
 
+    case WM_MOUSEWHEEL: {
+        // Açık adanın üstünde teker: zamanlayıcı süresi (Ctrl ile 5'er dakika).
+        int notches = GET_WHEEL_DELTA_WPARAM(wp) / WHEEL_DELTA;
+        if (notches == 0) notches = GET_WHEEL_DELTA_WPARAM(wp) > 0 ? 1 : -1;
+        int step = (GET_KEYSTATE_WPARAM(wp) & MK_CONTROL) ? 5 : 1;
+        companion_.AdjustPending(notches * step, Now());
+        eyes_.SetMood(Eyes::Mood::Curious, Now(), 1.0);
+        Sounds::Play(Sounds::Sound::Close);
+        Update();
+        if (!animating_) Render();
+        return 0;
+    }
+
     case WM_HOTKEY:
         if (wp == kHotkeyToggle) ToggleUserHidden();
         return 0;
@@ -1103,6 +1312,7 @@ LRESULT Island::WndProc(UINT msg, WPARAM wp, LPARAM lp) {
     }
 
     case WM_DESTROY: {
+        companion_.Save();
         UnregisterHotKey(hwnd_, kHotkeyToggle);
         NOTIFYICONDATAW nid{sizeof(nid)};
         nid.hWnd = hwnd_;
