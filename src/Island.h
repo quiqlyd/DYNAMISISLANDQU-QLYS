@@ -27,10 +27,11 @@ public:
     int Run();
 
 private:
-    enum class View { Idle, Media, ExpandedMedia, ExpandedIdle, Alert, Timer, Command, Drop, Picker };
+    enum class View { Idle, Media, ExpandedMedia, ExpandedIdle, Alert, Timer, Command, Drop, Picker, Note, Ink, Quick };
     enum class AlertKind { Charging, Unplugged, LowBattery, UpdateAvailable, Updating, UpToDate, UpdateFailed, TimerDone, FocusDone, BreakDone,
                            CpuBusy, MemoryFull, Offline, Online, Download,
-                           Reminder, ReminderSet, Screenshot, Volume, Headphones, HeadphonesLow, Copied };
+                           Reminder, ReminderSet, Screenshot, Volume, Headphones, HeadphonesLow, Copied,
+                           Reading, OcrFailed };
 
     static LRESULT CALLBACK StaticWndProc(HWND, UINT, WPARAM, LPARAM);
     LRESULT WndProc(UINT msg, WPARAM wp, LPARAM lp);
@@ -92,6 +93,58 @@ private:
     void EndPicker(bool pick);
     void OnPickerMove();
     static LRESULT CALLBACK PickerProc(HWND, UINT, WPARAM, LPARAM);
+
+public:
+    // Araç çentiği (Tools.cpp): araç ızgarası, yazı tanıma, kahve, not, ekrana çizim, hızlı ayarlar
+    enum class Tool { Ocr, Shot, Picker, Coffee, Note, Ink, Quick, Focus, Calc, Sounds, Update, Count };
+    static constexpr int kToolCount = static_cast<int>(Tool::Count);
+
+private:
+    bool Typing() const { return commandMode_ || noteMode_; }
+    bool ToolsShown(View v) const { return v == View::ExpandedIdle || v == View::ExpandedMedia; }
+    float ToolsTop() const;
+    float ToolsX0(float w) const;
+    int ToolHit(float x, float y) const;  // araç no; -10/-11: sayfa noktası; -1: yok
+    bool ToolActive(Tool t) const;
+    void DrawTools(View v, float w);
+    void RunTool(Tool t);
+    void SetToolPage(int page);
+    void ToggleFocus();
+    void ToggleSounds();
+    void StartUpdate();
+    // Yazı tanıma
+    void StartOcr();
+    bool RunOcr(IWICBitmapSource* src);
+    void OnOcrDone(int code, const std::wstring& text);
+    Microsoft::WRL::ComPtr<IWICBitmap> ClipboardBitmap();
+    // Kahve: bilgisayar uyumaz, Guti de uyumaz
+    void SetCoffee(bool on);
+    void DrawCup(float x, float cy, float alpha);
+    // Not
+    void OpenNote();
+    void CloseNote(bool restoreFocus);
+    void OnNoteChar(wchar_t c);
+    void LoadNote();
+    void SaveNote();
+    void DrawNote(float w, float h);
+    // Ekrana çizim
+    void StartInk();
+    void EndInk();
+    void InkPoint(POINT pt, bool begin);
+    void RedrawInk();
+    void PresentInk(const RECT* dirty);
+    void InkUndo();
+    void InkClear();
+    void SetInkColor(int i);
+    int InkBarHit(float x, float y) const;
+    void DrawInkBar(float w, float h);
+    static LRESULT CALLBACK InkProc(HWND, UINT, WPARAM, LPARAM);
+    // Hızlı ayarlar
+    void OpenQuick();
+    int QuickHit(float x, float y) const;
+    void QuickSlider(int which, float x);
+    void QuickClick(int hit);
+    void DrawQuick(float w, float h);
 
     // Çizim
     bool CreateGpu();
@@ -300,4 +353,36 @@ private:
     HWND picker_ = nullptr;
     COLORREF pickColor_ = 0;
     double swallowUpUntil_ = 0;  // indirme kartına basınca gelen bırakma tıklamasını yut
+
+    // Araç çentiği
+    int toolPage_ = 0;
+    int hoverTool_ = -1;
+    Spring pageX_, toolGlow_[kToolCount];
+    bool ocrPending_ = false;
+    double ocrAskedAt_ = 0;
+    bool coffee_ = false;
+    bool noteMode_ = false;
+    std::wstring note_;
+    Microsoft::WRL::ComPtr<IDWriteTextFormat> fNote_, fAa_;
+    struct Stroke {
+        D2D1_COLOR_F color;
+        std::vector<D2D1_POINT_2F> pts;
+    };
+    HWND ink_ = nullptr;
+    HDC inkDC_ = nullptr;
+    HBITMAP inkDib_ = nullptr;
+    HGDIOBJ inkOld_ = nullptr;
+    void* inkBits_ = nullptr;
+    int inkW_ = 0, inkH_ = 0;
+    RECT inkRect_{};
+    Microsoft::WRL::ComPtr<IWICBitmap> inkWic_;  // çizimin kalıcı tuvali
+    Microsoft::WRL::ComPtr<ID2D1RenderTarget> inkRt_;
+    Microsoft::WRL::ComPtr<ID2D1SolidColorBrush> inkBrush_;
+    std::vector<Stroke> strokes_;
+    int inkColor_ = 0;
+    bool inkDown_ = false;
+    bool quickOpen_ = false;
+    int radios_ = -1;       // Sys.h Radios bitleri; -1: bilinmiyor
+    int brightness_ = -1;   // 0-100, 255: desteklenmiyor, -1: okunuyor
+    int sliderDrag_ = -1;   // 0 parlaklık, 1 ses
 };
