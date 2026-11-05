@@ -341,6 +341,25 @@ void Island::OnAnimationTick() {
     dt = std::clamp(dt, 0.001f, 0.05f);
     time_ += dt;
 
+    // Müzik çalarken hoparlörün sesine bakar: çubuklar gerçek sesle oynar, vuruşta Guti zıplar.
+    if (NeedsContinuousFrames()) {
+        float peak = meter_.Peak(time_);
+        if (peak >= 0) {
+            if (level_ < 0) level_ = 0;
+            level_ = std::max(peak, level_ - dt * 2.2f);
+            float k = std::min(1.f, dt * 1.5f);
+            avgLevel_ += (peak - avgLevel_) * k;
+            if (peak > 0.06f && peak > avgLevel_ * 1.45f && time_ - lastBeat_ > 0.26) {
+                lastBeat_ = time_;
+                beatPulse_ = 1.f;
+                height_.velocity += view_ == View::Media ? 14.f : 9.f;
+            }
+        } else {
+            level_ = -1.f;
+        }
+    }
+    beatPulse_ = std::max(0.f, beatPulse_ - dt * 5.f);
+
     bool moving = false;
     // Küçük adımlarla entegre et: yay kararlı kalsın.
     for (float left = dt; left > 0; left -= 1.f / 240.f) {
@@ -676,6 +695,11 @@ void Island::DrawBars(float right, float centerY, float maxHeight, float barWidt
             double v = std::sin(time_ * (5.0 + i * 1.7) + i * 1.3) *
                        std::sin(time_ * (2.3 + i * 0.9) + i);
             t = 0.3f + 0.7f * static_cast<float>(std::fabs(v));
+            if (level_ >= 0) {
+                // Gerçek ses seviyesi; her çubuğa biraz farklı salınım katılır.
+                float lv = std::min(1.f, level_ * 1.5f);
+                t = std::clamp(lv * (0.55f + 0.45f * static_cast<float>(std::fabs(v))), 0.15f, 1.f);
+            }
         }
         float bh = std::max(barWidth, maxHeight * t);
         D2D1_ROUNDED_RECT bar{D2D1::RectF(x, centerY - bh / 2, x + barWidth, centerY + bh / 2),
@@ -695,7 +719,11 @@ void Island::DrawCompactMedia(float w, float h) {
     DrawArt(D2D1::RectF(pad, pad, pad + side, pad + side), 7.f);
     DrawBars(w - 14.f, h / 2, 14.f, 3.f);
     // Müzik çalarken gözler ritimle hafifçe sallanır.
-    float bob = snapshot_.playing ? static_cast<float>(std::sin(time_ * 7.0)) * 1.6f : 0.f;
+    float bob = 0.f;
+    if (snapshot_.playing) {
+        bob = level_ >= 0 ? -beatPulse_ * 2.4f  // vuruşta hop
+                          : static_cast<float>(std::sin(time_ * 7.0)) * 1.6f;
+    }
     eyes_.Draw(rt_.Get(), d2d_.Get(), brush_.Get(), roundStroke_.Get(), w / 2, h / 2, 0.85f, bob);
 }
 

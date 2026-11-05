@@ -163,5 +163,11 @@ private:
     double lastShot_ = -1e9;
     double lastSweat_ = -1e9;
     std::wstring downloadPath_;
+    // Müziğe gerçek ritimle dans
+    AudioMeter meter_;
+    float level_ = -1.f;     // ekranda gösterilen seviye (hızlı yükselir, yavaş iner)
+    float avgLevel_ = 0.f;   // uzun ortalama: vuruşu bunun üstündeki sıçrama belirler
+    float beatPulse_ = 0.f;  // vuruştan sonra sönen zıplama
+    double lastBeat_ = 0;
     double swallowUpUntil_ = 0;  // indirme kartına basınca gelen bırakma tıklamasını yut
 };

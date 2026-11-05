@@ -45,6 +45,19 @@ private:
     bool camera_ = false, mic_ = false;
 };
 
+// Hoparlöre giden sesin anlık seviyesi (Windows'un ses ölçeri). Sadece müzik çalarken ve
+// ada görünürken okunur; ses verisinin kendisine dokunmaz, sadece 0..1 tepe değeri.
+class AudioMeter {
+public:
+    ~AudioMeter();
+    float Peak(double now);  // < 0: ölçer yok
+
+private:
+    void Acquire();
+    struct IAudioMeterInformation* meter_ = nullptr;
+    double acquiredAt_ = -1e9;
+};
+
 // İndirilenler klasörü: biten bir dosya gelince pencereye mesaj gönderir.
 // lParam = new std::wstring(tam yol); alıcı silmelidir.
 namespace DownloadWatch {

@@ -1,6 +1,8 @@
 #include "Watchers.h"
 
 #include <shlobj.h>
+#include <mmdeviceapi.h>
+#include <endpointvolume.h>
 #include <algorithm>
 #include <cwctype>
 #include <initializer_list>
@@ -229,4 +231,46 @@ void DownloadWatch::Start(HWND notify) {
         }
         CloseHandle(h);
     }).detach();
+}
+
+// ---------------------------------------------------------------------------
+// Ses ölçer
+// ---------------------------------------------------------------------------
+
+AudioMeter::~AudioMeter() {
+    if (meter_) meter_->Release();
+}
+
+void AudioMeter::Acquire() {
+    if (meter_) {
+        meter_->Release();
+        meter_ = nullptr;
+    }
+    IMMDeviceEnumerator* en = nullptr;
+    if (FAILED(CoCreateInstance(__uuidof(MMDeviceEnumerator), nullptr, CLSCTX_INPROC_SERVER,
+                                IID_PPV_ARGS(&en))))
+        return;
+    IMMDevice* dev = nullptr;
+    if (SUCCEEDED(en->GetDefaultAudioEndpoint(eRender, eConsole, &dev))) {
+        dev->Activate(__uuidof(IAudioMeterInformation), CLSCTX_INPROC_SERVER, nullptr,
+                      reinterpret_cast<void**>(&meter_));
+        dev->Release();
+    }
+    en->Release();
+}
+
+float AudioMeter::Peak(double now) {
+    // Varsayılan hoparlör değişebilir (kulaklık takıldı vb.): arada bir yeniden bağlan.
+    if (!meter_ ? now - acquiredAt_ > 5 : now - acquiredAt_ > 20) {
+        acquiredAt_ = now;
+        Acquire();
+    }
+    if (!meter_) return -1.f;
+    float peak = 0;
+    if (FAILED(meter_->GetPeakValue(&peak))) {
+        meter_->Release();
+        meter_ = nullptr;
+        return -1.f;
+    }
+    return peak;
 }

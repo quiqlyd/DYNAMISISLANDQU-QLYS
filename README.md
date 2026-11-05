@@ -10,7 +10,7 @@ Windows 11 için Dinamik Ada (ve ileride modern taskbar). C++ ve saf Win32 + Dir
   - Şarj takılınca kalp gözler, şarj çıkınca ya da pil azalınca **üzülür** (gözyaşı)
   - Müzik başlayınca sevinir, durunca üzülür, yeni şarkıda şaşırır
   - Kimse yokken uyur (gece daha çabuk), fare yaklaşınca uyanır
-- **Müzik:** Spotify, tarayıcı, Medya Oynatıcı... Kapak resmi, şarkı/sanatçı, ilerleme çubuğu, geri / oynat-durdur / ileri. Ekolayzer kapak rengini alır, gözler ritimle sallanır
+- **Müzik:** Spotify, tarayıcı, Medya Oynatıcı... Kapak resmi, şarkı/sanatçı, ilerleme çubuğu, geri / oynat-durdur / ileri. Ekolayzer kapak rengini alır ve hoparlörden çıkan gerçek sesle oynar; her vuruşta Guti zıplayarak dans eder
 - Üzerine gelince açılır: müzik yoksa büyük saat, tarih, pil ve gözler
 - Şarj takıldı / çıkarıldı / pil azaldı uyarıları
 - Oyun veya tam ekran video açıkken kendini gizler
