@@ -29,11 +29,11 @@ public:
     int Run();
 
 private:
-    enum class View { Idle, Media, ExpandedMedia, ExpandedIdle, Alert, Timer, Command, Drop, Picker, Note, Ink, Quick, Home };
+    enum class View { Idle, Media, ExpandedMedia, ExpandedIdle, Alert, Timer, Command, Drop, Picker, Note, Ink, Quick, Home, Diary };
     enum class AlertKind { Charging, Unplugged, LowBattery, UpdateAvailable, Updating, UpToDate, UpdateFailed, TimerDone, FocusDone, BreakDone,
                            CpuBusy, MemoryFull, Offline, Online, Download,
                            Reminder, ReminderSet, Screenshot, Volume, Headphones, HeadphonesLow, Copied,
-                           Reading, OcrFailed };
+                           Reading, OcrFailed, Notification };
 
     static LRESULT CALLBACK StaticWndProc(HWND, UINT, WPARAM, LPARAM);
     LRESULT WndProc(UINT msg, WPARAM wp, LPARAM lp);
@@ -98,7 +98,7 @@ private:
 
 public:
     // Araç çentiği (Tools.cpp): araç ızgarası, yazı tanıma, kahve, not, ekrana çizim, hızlı ayarlar
-    enum class Tool { Ocr, Shot, Picker, Coffee, Note, Ink, Quick, Focus, Calc, Sounds, Update, Sleep, Count };
+    enum class Tool { Ocr, Shot, Picker, Coffee, Note, Ink, Quick, Focus, Calc, Sounds, Update, Sleep, Diary, Count };
     static constexpr int kToolCount = static_cast<int>(Tool::Count);
     // Favori siteler: araç ızgarasının son sayfası. ToolHit bunlar için kFavHit + sıra döndürür,
     // "+" kutucuğu için kFavHit + kFavMax.
@@ -198,6 +198,21 @@ private:
     void OnWeather(Weather::Info* info);
     void OnWeatherMood(double now);
     void SetCity(std::wstring city);
+    // 3. parti (Diary.cpp): Guti'nin günlüğü, şarkıyı kalple
+    struct DayStats {
+        std::wstring date;  // YYYY-MM-DD
+        int focusSec = 0, songs = 0, pets = 0;
+        std::wstring topSong;
+    };
+    void LoadDiary();
+    void SaveDiary();
+    void OnDiaryTick();
+    void RollDay();
+    void OpenDiary(bool automatic);
+    void DrawDiary(float w, float h);
+    bool IsLiked() const;
+    void ToggleLike();
+    void LoadLikes();
 
     // Çizim
     bool CreateGpu();
@@ -497,4 +512,18 @@ private:
     double lastShiver_ = -1e9, lastHeat_ = -1e9;
     // Albüm ışığı ve aksesuarlar
     bool albumGlow_ = true, accessories_ = true;
+    // Günlük
+    DayStats today_;
+    std::vector<DayStats> history_;  // eski günler, en yenisi sonda (en çok 7)
+    std::vector<std::pair<std::wstring, int>> listen_;  // bugün: şarkı -> dinlenen saniye
+    bool diaryOpen_ = false;
+    double diaryUntil_ = 0;
+    int diaryShownDay_ = -1;
+    int diarySaveTick_ = 0;
+    std::wstring diarySong_;  // en son sayılan şarkı
+    // Beğenilen şarkılar
+    std::vector<std::wstring> likes_;
+    Spring heartPop_;
+    // Bildirim aynası
+    bool notifyOn_ = true;
 };

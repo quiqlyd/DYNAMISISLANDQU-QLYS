@@ -3,6 +3,8 @@
 #include "Sounds.h"
 #include "Sys.h"
 #include "Updater.h"
+#include "Net.h"
+#include "Notify.h"
 
 #include <objbase.h>
 #include <dwmapi.h>
@@ -71,6 +73,8 @@ constexpr UINT kCmdAlbumGlow = 122;
 constexpr UINT kCmdAccessories = 123;
 constexpr UINT kCmdWeather = 124;
 constexpr UINT kCmdCity = 125;
+constexpr UINT kCmdLikes = 126;
+constexpr UINT kCmdNotify = 127;
 constexpr UINT kCmdEyeWhite = 130;   // 130-136 hazır renkler
 constexpr UINT kCmdEyeAccent = 140;  // Windows vurgu rengi
 constexpr UINT kCmdEyePick = 141;    // ekrandan seç
@@ -364,6 +368,10 @@ bool Island::Create(HINSTANCE instance) {
     LoadNote();
     LoadLook();
     LoadFavorites();
+    LoadDiary();
+    heartPop_.Snap(1.f);
+    heartPop_.stiffness = 420.f;
+    heartPop_.damping = 13.f;
     {
         wchar_t city[64]{};
         DWORD size = sizeof(city);
@@ -373,6 +381,9 @@ bool Island::Create(HINSTANCE instance) {
         weatherOn_ = ReadSetting(L"Weather", 1) != 0;
         albumGlow_ = ReadSetting(L"AlbumGlow", 1) != 0;
         accessories_ = ReadSetting(L"Accessories", 1) != 0;
+        notifyOn_ = ReadSetting(L"NotifyMirror", 1) != 0;
+        NotifyMirror::SetEnabled(notifyOn_);
+        NotifyMirror::Start(hwnd_);
         SetTimer(hwnd_, kTimerWeather, 5000, nullptr);  // açılıştan biraz sonra hava durumu
     }
     userHidden_ = ReadSetting(L"Hidden", 0) != 0;
@@ -441,6 +452,7 @@ Island::View Island::TargetView() const {
     if (dropHover_) return View::Drop;
     if (picker_) return View::Picker;
     if (alertActive_) return View::Alert;
+    if (diaryOpen_) return View::Diary;
     bool timer = companion_.TimerActive() || companion_.Pending();
     if (hover_) {
         if (quickOpen_) return View::Quick;
@@ -461,6 +473,7 @@ void Island::SetTargets(View v) {
     case View::ExpandedIdle: s = kExpandedIdle; break;
     case View::Alert:
         s = !IsFileCard() ? kAlert : (alertKind_ == AlertKind::Screenshot ? kShot : kDownload);
+        if (alertKind_ == AlertKind::Notification) s = {390, 40, 20};
         break;
     case View::Timer: s = kTimer; break;
     case View::Command: s = {kCommandW, CommandHeight(), 24}; break;
@@ -470,6 +483,7 @@ void Island::SetTargets(View v) {
     case View::Ink: s = kInk; break;
     case View::Quick: s = kQuick; break;
     case View::Home: s = kHome; break;
+    case View::Diary: s = kDiary; break;
     }
     if (ToolsShown(v)) s.h += kToolsH;
     if (ToolsShown(v) && ShelfVisible()) s.h += kShelfH;
@@ -497,7 +511,7 @@ void Island::Update() {
     // İndirme kartı ise tıklanır ve sürüklenir.
     bool interactive = v == View::ExpandedMedia || v == View::ExpandedIdle || IsFileCard() ||
                        v == View::Command || v == View::Drop || v == View::Note || v == View::Ink ||
-                       v == View::Quick || v == View::Home || dropArmed_;
+                       v == View::Quick || v == View::Home || v == View::Diary || dropArmed_;
     LONG_PTR ex = GetWindowLongPtrW(hwnd_, GWL_EXSTYLE);
     LONG_PTR want = interactive ? (ex & ~static_cast<LONG_PTR>(WS_EX_TRANSPARENT))
                                 : (ex | WS_EX_TRANSPARENT);
@@ -597,6 +611,7 @@ void Island::OnAnimationTick() {
         moving |= ghost_.Step(step);
         for (auto& g : toolGlow_) moving |= g.Step(step);
         for (auto& g : favGlow_) moving |= g.Step(step);
+        moving |= heartPop_.Step(step);
     }
     if (nodPulse_ > 0.f) moving = true;
     if (trans_ < 1.f) {
@@ -659,6 +674,10 @@ void Island::ShowAlert(AlertKind kind, int value, UINT durationMs) {
         shake_.velocity += 200.f;
         break;
     case AlertKind::Offline: MoodWithSound(Eyes::Mood::Sad, 3.0); break;
+    case AlertKind::Notification:
+        eyes_.SetMood(Eyes::Mood::Curious, now, 1.4);  // başını bildirime çevirir
+        height_.velocity += 70.f;
+        break;
     case AlertKind::Online:
         MoodWithSound(Eyes::Mood::Happy, 2.0);
         height_.velocity += 90.f;
@@ -1009,6 +1028,7 @@ void Island::DrawView(View v, float w, float h) {
     case View::Ink: DrawInkBar(w, h); break;
     case View::Quick: DrawQuick(w, h); break;
     case View::Home: DrawHome(w, h); break;
+    case View::Diary: DrawDiary(w, h); break;
     }
     if (ToolsShown(v)) DrawTools(v, w);
     if (ToolsShown(v) && ShelfVisible()) DrawShelf(w);
@@ -1249,6 +1269,15 @@ void Island::DrawExpandedMedia(float w, float h) {
     Text(title, fTitle_.Get(), D2D1::RectF(tx, pad + 6, tr, pad + 30), kWhite);
     Text(snapshot_.artist.c_str(), fArtist_.Get(), D2D1::RectF(tx, pad + 32, tr, pad + 54), kGray);
     DrawBars(w - pad, pad + 18, 16.f, 3.f);
+    {
+        // Kalp: şarkıyı beğen
+        bool liked = IsLiked();
+        float hx = w - pad - 10.f, hy = pad + 44.f;
+        PushFade(1.f, 0, 0, std::max(0.5f, heartPop_.value), hx, hy);
+        Text(liked ? kGlyphHeartFill : kGlyphHeart, fIcon_.Get(), D2D1::RectF(hx - 12, hy - 12, hx + 12, hy + 12),
+             liked ? Rgba(1.f, 0.42f, 0.58f) : (mediaHover_ == 22 ? kWhite : kGray));
+        PopFade();
+    }
     PopFade();
 
     // Şarkı sözleri: önceki, şimdiki, sonraki satır; yeni satır alttan kayarak gelir.
@@ -1559,6 +1588,7 @@ void Island::DrawAlert(float w, float h) {
         case AlertKind::HeadphonesLow: label = alertLabel_.c_str(); glyph = kGlyphHeadphone; color = kRed; break;
         case AlertKind::Reading: label = alertLabel_.c_str(); glyph = kGlyphSync; color = accent_; break;
         case AlertKind::OcrFailed: label = alertLabel_.c_str(); glyph = kGlyphError; color = kOrange; break;
+        case AlertKind::Notification: label = alertLabel_.c_str(); glyph = L"\xEA8F"; color = accent_; break;
         default: break;
         }
         Text(glyph, fIcon_.Get(), D2D1::RectF(12, 0, 40, h), color);
@@ -1644,8 +1674,18 @@ void Island::OnClick(float x, float y) {
         HomeClick(HomeHit(x, y));
         return;
     }
+    if (view_ == View::Diary) {
+        diaryOpen_ = false;  // günlüğe tıkla: kapanır
+        Sounds::Play(Sounds::Sound::Close);
+        Update();
+        return;
+    }
     if (view_ == View::ExpandedMedia) {
         const float pad = 18.f, art = 64.f;
+        if (MediaHit(x, y) == 22) {
+            ToggleLike();
+            return;
+        }
         if (homeOn_ && homeMedia_ && x >= pad && x <= pad + art && y >= pad && y <= pad + art) {
             homeMedia_ = false;  // kapağa tıkla: ana sayfaya dön
             Sounds::Play(Sounds::Sound::Close);
@@ -1694,7 +1734,7 @@ double Island::Now() const {
 bool Island::ViewShowsEyes() const {
     return view_ == View::Idle || view_ == View::Media || view_ == View::ExpandedIdle ||
            view_ == View::Timer || view_ == View::Command || view_ == View::Picker ||
-           view_ == View::Note || view_ == View::Ink || view_ == View::Quick || view_ == View::Home ||
+           view_ == View::Note || view_ == View::Ink || view_ == View::Quick || view_ == View::Home || view_ == View::Diary ||
            (view_ == View::Alert && alertKind_ == AlertKind::Volume);
 }
 
@@ -1705,6 +1745,7 @@ void Island::Pet() {
     clickStreak_ = (now - lastClick_ < 0.7) ? clickStreak_ + 1 : 1;
     lastClick_ = now;
     companion_.OnPet(now);
+    ++today_.pets;
     eyes_.SetAffection(companion_.Affection());
 
     using M = Eyes::Mood;
@@ -1751,6 +1792,7 @@ void Island::SetHover(bool hover) {
     if (!hover) {
         quickOpen_ = false;
         homeMedia_ = false;
+        if (diaryOpen_ && diaryUntil_ == 0) diaryOpen_ = false;
     }  // kapanınca bir dahaki açılış yine araçlarla başlar
     Sounds::Play(hover ? Sounds::Sound::Open : Sounds::Sound::Close);
 }
@@ -2864,6 +2906,14 @@ void Island::ShowTrayMenu() {
         swprintf_s(renameLabel, L"Adını değiştir (%s)…", name_.c_str());
         AppendMenuW(settings, MF_STRING, kCmdRename, renameLabel);
     }
+    {
+        int mode = NotifyMirror::Mode();
+        const wchar_t* how = mode == 1 ? L"" : (mode == 2 ? L"  (pencere izleme)" : (mode == 3 ? L"  (çalışmıyor)" : L""));
+        wchar_t label[96];
+        swprintf_s(label, L"Bildirim aynası%s", how);
+        AppendMenuW(settings, MF_STRING | (notifyOn_ ? MF_CHECKED : 0), kCmdNotify, label);
+    }
+    AppendMenuW(settings, MF_STRING, kCmdLikes, L"Beğenilen şarkılar…");
     AppendMenuW(settings, MF_STRING, kCmdUpdate, updateLabel);
     bool focusing = companion_.Kind() == Companion::TimerKind::Focus ||
                     companion_.Kind() == Companion::TimerKind::Break;
@@ -2928,6 +2978,16 @@ void Island::ShowTrayMenu() {
     if (cmd == kCmdCommand) {
         if (userHidden_) ToggleUserHidden();
         OpenCommand();
+    }
+    if (cmd == kCmdNotify) {
+        notifyOn_ = !notifyOn_;
+        WriteSetting(L"NotifyMirror", notifyOn_ ? 1 : 0);
+        NotifyMirror::SetEnabled(notifyOn_);
+    }
+    if (cmd == kCmdLikes) {
+        std::wstring path = Net::DataDir() + L"begeniler.txt";
+        if (GetFileAttributesW(path.c_str()) == INVALID_FILE_ATTRIBUTES) Net::WriteFile(path, "");
+        ShellExecuteW(nullptr, L"open", path.c_str(), nullptr, nullptr, SW_SHOWNORMAL);
     }
     if (cmd == kCmdHome) {
         homeOn_ = !homeOn_;
@@ -3160,6 +3220,23 @@ LRESULT Island::WndProc(UINT msg, WPARAM wp, LPARAM lp) {
         return 0;
     }
 
+    case NotifyMirror::WM_TOAST: {
+        std::unique_ptr<NotifyMirror::Toast> t(reinterpret_cast<NotifyMirror::Toast*>(lp));
+        if (!t || !notifyOn_ || fullscreen_ || userHidden_ || Typing() || ink_ || picker_) return 0;
+        if (companion_.Kind() == Companion::TimerKind::Focus) {
+            eyes_.SetMood(Eyes::Mood::Glance, Now(), 1.0);  // odaktayken rahatsız etmez, sadece bakar
+            StartAnimation();
+            return 0;
+        }
+        std::wstring label = t->app.empty() || t->app == t->title ? t->title : t->app + L": " + t->title;
+        if (!t->body.empty()) label += L" \u2014 " + t->body;
+        for (auto& c : label)
+            if (c == L'\n' || c == L'\r' || c == L'\t') c = L' ';
+        alertLabel_ = label;
+        ShowAlert(AlertKind::Notification, 0, 4500);
+        return 0;
+    }
+
     case Weather::WM_WEATHER:
         OnWeather(reinterpret_cast<Weather::Info*>(lp));
         return 0;
@@ -3301,6 +3378,7 @@ LRESULT Island::WndProc(UINT msg, WPARAM wp, LPARAM lp) {
             if (CheckSlim()) Update();
             OnCompanionTick();
             OnSleepTick();
+            OnDiaryTick();
             OnWeatherMood(Now());
             if (healthTick_ % 10 == 0) CheckAccessoryUnlocks();
             OnPrivacyTick();
@@ -3491,6 +3569,7 @@ LRESULT Island::WndProc(UINT msg, WPARAM wp, LPARAM lp) {
 
     case WM_DESTROY: {
         companion_.Save();
+        SaveDiary();
         if (sleepFading_ && sleepRestoreVol_ >= 0) VolumeWatch::Set(sleepRestoreVol_);
         if (noteMode_) SaveNote();
         if (ink_) EndInk();

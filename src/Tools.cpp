@@ -29,6 +29,7 @@ const ToolInfo kToolInfo[] = {
     {kGlyphCafe, L"Kahve"},      {kGlyphNote, L"Not"},      {kGlyphPen, L"Çiz"},
     {kGlyphSettings, L"Ayarlar"}, {kGlyphTimer, L"Odak"},   {kGlyphCalc, L"Hesap"},
     {kGlyphVolume, L"Sesler"},   {kGlyphSync, L"Güncelle"}, {kGlyphMoon, L"Uyku"},
+    {kGlyphBook, L"Günlük"},
 };
 static_assert(sizeof(kToolInfo) / sizeof(kToolInfo[0]) == static_cast<size_t>(Island::kToolCount));
 
@@ -201,6 +202,7 @@ void Island::RunTool(Tool t) {
     case Tool::Sounds: ToggleSounds(); break;
     case Tool::Update: StartUpdate(); break;
     case Tool::Sleep: CycleSleep(); break;
+    case Tool::Diary: OpenDiary(false); break;
     case Tool::Count: break;
     }
     StartAnimation();
@@ -971,6 +973,10 @@ int Island::MediaHit(float x, float y) const {
     if (snapshot_.durationSec > 0 && std::fabs(y - (kMProgY + 2.f)) <= 8.f && x >= kMPad - 6.f && x <= w - kMPad + 6.f)
         return 20;
     if (std::fabs(y - kMCtrlY) <= 12.f && x >= w - 108.f && x <= w - kMPad + 6.f) return 21;
+    {
+        float dx = x - (w - kMPad - 10.f), dy = y + LyricsH() - (kMPad + 44.f);  // kalp (söz alanından etkilenmez)
+        if (dx * dx + dy * dy <= 14.f * 14.f) return 22;
+    }
     return -1;
 }
 
