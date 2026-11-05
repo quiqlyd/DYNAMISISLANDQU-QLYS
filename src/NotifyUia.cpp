@@ -2,6 +2,8 @@
 // winrt başlıklarıyla çakıştığı için ayrı dosyada.
 #include "Notify.h"
 
+#include <ole2.h>  // WIN32_LEAN_AND_MEAN ile "interface" tanımı buradan gelir
+#include <oleauto.h>
 #include <UIAutomationClient.h>
 #include <wrl/client.h>
 #include <atomic>
