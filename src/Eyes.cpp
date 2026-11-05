@@ -52,7 +52,6 @@ const bool kFlags[][3] = {
 static_assert(sizeof(kRows) / sizeof(kRows[0]) == static_cast<size_t>(Eyes::Mood::Count));
 static_assert(sizeof(kFlags) / sizeof(kFlags[0]) == static_cast<size_t>(Eyes::Mood::Count));
 
-constexpr D2D1_COLOR_F kEye{0.93f, 0.97f, 1.f, 1.f};
 constexpr D2D1_COLOR_F kBlack{0.f, 0.f, 0.f, 1.f};
 constexpr D2D1_COLOR_F kPink{1.f, 0.42f, 0.58f, 1.f};
 constexpr D2D1_COLOR_F kTear{0.45f, 0.75f, 1.f, 1.f};
@@ -242,7 +241,7 @@ void Arc(ID2D1RenderTarget* rt, ID2D1Factory* f, ID2D1Brush* b, ID2D1StrokeStyle
 void Eyes::Draw(ID2D1RenderTarget* rt, ID2D1Factory* f, ID2D1SolidColorBrush* brush,
                 ID2D1StrokeStyle* round, float cx, float cy, float u, float bob) const {
     const float eyeW = 9.f * u, eyeH = 14.f * u, spacing = 23.f * u;
-    const D2D1_COLOR_F eyeColor = tinted_ ? tint_ : kEye;
+    const D2D1_COLOR_F eyeColor = tinted_ ? tint_ : base_;
 
     auto c01 = [](float v) { return std::clamp(v, 0.f, 1.f); };
     float happy = c01(happy_.value), heart = std::clamp(heart_.value, 0.f, 1.3f),

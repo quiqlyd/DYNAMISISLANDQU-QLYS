@@ -61,6 +61,24 @@ constexpr UINT kCmdOcr = 112;
 constexpr UINT kCmdNote = 113;
 constexpr UINT kCmdInk = 114;
 constexpr UINT kCmdCoffee = 115;
+constexpr UINT kCmdAlbumTint = 116;
+constexpr UINT kCmdLyrics = 117;
+constexpr UINT kCmdLyricsPill = 118;
+constexpr UINT kCmdRename = 119;
+constexpr UINT kCmdSleep = 120;
+constexpr UINT kCmdEyeWhite = 130;   // 130-136 hazır renkler
+constexpr UINT kCmdEyeAccent = 140;  // Windows vurgu rengi
+constexpr UINT kCmdEyePick = 141;    // ekrandan seç
+
+struct EyePreset {
+    const wchar_t* name;
+    COLORREF rgb;
+};
+const EyePreset kEyePresets[] = {
+    {L"Beyaz", RGB(255, 255, 255)}, {L"Pembe", RGB(255, 140, 190)}, {L"Mavi", RGB(115, 190, 255)},
+    {L"Yeşil", RGB(115, 240, 150)}, {L"Sarı", RGB(255, 225, 90)},   {L"Mor", RGB(190, 150, 255)},
+    {L"Turuncu", RGB(255, 165, 90)},
+};
 std::wstring FormatClock(const SYSTEMTIME& st) {
     wchar_t buf[64];
     if (GetTimeFormatEx(LOCALE_NAME_USER_DEFAULT, TIME_NOSECONDS, &st, nullptr, buf, 64))
@@ -150,21 +168,44 @@ public:
     HRESULT STDMETHODCALLTYPE DragEnter(IDataObject* data, DWORD, POINTL, DWORD* effect) override {
         FORMATETC fe{CF_HDROP, nullptr, DVASPECT_CONTENT, -1, TYMED_HGLOBAL};
         hasFiles_ = data && data->QueryGetData(&fe) == S_OK;
-        *effect = hasFiles_ ? DROPEFFECT_COPY : DROPEFFECT_NONE;  // kopya: kaynak dosya silinmez
-        if (hasFiles_) island_->OnDropEnter();
+        // Tarayıcıdan sürüklenen bağlantı: favorilere eklenir.
+        FORMATETC fu{UrlFormat(), nullptr, DVASPECT_CONTENT, -1, TYMED_HGLOBAL};
+        hasUrl_ = !hasFiles_ && data && fu.cfFormat && data->QueryGetData(&fu) == S_OK;
+        *effect = (hasFiles_ || hasUrl_) ? DROPEFFECT_COPY : DROPEFFECT_NONE;  // kopya: kaynak dosya silinmez
+        if (hasFiles_ || hasUrl_) {
+            island_->dropUrl_ = hasUrl_;
+            island_->OnDropEnter();
+        }
         return S_OK;
     }
     HRESULT STDMETHODCALLTYPE DragOver(DWORD, POINTL, DWORD* effect) override {
-        *effect = hasFiles_ ? DROPEFFECT_COPY : DROPEFFECT_NONE;
+        *effect = (hasFiles_ || hasUrl_) ? DROPEFFECT_COPY : DROPEFFECT_NONE;
         return S_OK;
     }
     HRESULT STDMETHODCALLTYPE DragLeave() override {
-        if (hasFiles_) island_->OnDropLeave();
-        hasFiles_ = false;
+        if (hasFiles_ || hasUrl_) island_->OnDropLeave();
+        hasFiles_ = hasUrl_ = false;
         return S_OK;
     }
     HRESULT STDMETHODCALLTYPE Drop(IDataObject* data, DWORD, POINTL, DWORD* effect) override {
         *effect = DROPEFFECT_NONE;
+        if (hasUrl_) {
+            hasUrl_ = false;
+            std::wstring url;
+            FORMATETC fu{UrlFormat(), nullptr, DVASPECT_CONTENT, -1, TYMED_HGLOBAL};
+            STGMEDIUM sm{};
+            if (SUCCEEDED(data->GetData(&fu, &sm))) {
+                if (auto* p = static_cast<const wchar_t*>(GlobalLock(sm.hGlobal))) {
+                    url.assign(p, wcsnlen(p, 2048));
+                    GlobalUnlock(sm.hGlobal);
+                }
+                ReleaseStgMedium(&sm);
+                *effect = DROPEFFECT_COPY;
+            }
+            if (url.empty()) island_->OnDropLeave();
+            else island_->OnDropUrl(url);
+            return S_OK;
+        }
         std::vector<std::wstring> paths;
         FORMATETC fe{CF_HDROP, nullptr, DVASPECT_CONTENT, -1, TYMED_HGLOBAL};
         STGMEDIUM sm{};
@@ -185,9 +226,13 @@ public:
     }
 
 private:
+    static CLIPFORMAT UrlFormat() {
+        static const UINT f = RegisterClipboardFormatW(L"UniformResourceLocatorW");
+        return static_cast<CLIPFORMAT>(f);
+    }
     Island* island_;
     ULONG refs_ = 1;
-    bool hasFiles_ = false;
+    bool hasFiles_ = false, hasUrl_ = false;
 };
 
 // ---------------------------------------------------------------------------
@@ -250,6 +295,10 @@ bool Island::Create(HINSTANCE instance) {
         g.stiffness = 300.f;
         g.damping = 30.f;
     }
+    for (auto& g : favGlow_) {
+        g.stiffness = 300.f;
+        g.damping = 30.f;
+    }
     frameEvent_ = CreateEventW(nullptr, FALSE, FALSE, nullptr);
     std::thread([this] { FrameLoop(); }).detach();
     shake_.stiffness = 700.f;
@@ -308,6 +357,8 @@ bool Island::Create(HINSTANCE instance) {
     }
     LoadReminders();
     LoadNote();
+    LoadLook();
+    LoadFavorites();
     userHidden_ = ReadSetting(L"Hidden", 0) != 0;
     Update();
     Render();
@@ -388,8 +439,8 @@ void Island::SetTargets(View v) {
     Size3 s = kIdle;
     switch (v) {
     case View::Idle: s = kIdle; break;
-    case View::Media: s = slim_ ? kMediaSlim : kMedia; break;
-    case View::ExpandedMedia: s = kExpandedMedia; break;
+    case View::Media: s = slim_ ? kMediaSlim : (LyricPill() ? kMediaLyric : kMedia); break;
+    case View::ExpandedMedia: s = kExpandedMedia; s.h += LyricsH(); break;
     case View::ExpandedIdle: s = kExpandedIdle; break;
     case View::Alert:
         s = !IsFileCard() ? kAlert : (alertKind_ == AlertKind::Screenshot ? kShot : kDownload);
@@ -507,6 +558,8 @@ void Island::OnAnimationTick() {
         }
     }
     beatPulse_ = std::max(0.f, beatPulse_ - dt * 5.f);
+    if (NeedsContinuousFrames() && !lyrics_.empty()) UpdateLyricLine(Now());
+    nodPulse_ = std::max(0.f, nodPulse_ - dt * 3.2f);
 
     bool moving = false;
     // Küçük adımlarla entegre et: yay kararlı kalsın.
@@ -525,7 +578,9 @@ void Island::OnAnimationTick() {
         moving |= pageX_.Step(step);
         moving |= ghost_.Step(step);
         for (auto& g : toolGlow_) moving |= g.Step(step);
+        for (auto& g : favGlow_) moving |= g.Step(step);
     }
+    if (nodPulse_ > 0.f) moving = true;
     if (trans_ < 1.f) {
         trans_ = std::min(1.f, trans_ + dt / kTransition);
         moving = true;
@@ -731,6 +786,7 @@ bool Island::EnsureResources() {
         fAlertRight_ = MakeFormat(f, ui, 13.5f, DWRITE_FONT_WEIGHT_SEMI_BOLD, aT, false);
         fSmallCenter_ = MakeFormat(f, ui, 10.5f, DWRITE_FONT_WEIGHT_NORMAL, aC, true);
         fAa_ = MakeFormat(f, ui, 17.f, DWRITE_FONT_WEIGHT_SEMI_BOLD, aC, false);
+        fLyric_ = MakeFormat(f, ui, 13.5f, DWRITE_FONT_WEIGHT_SEMI_BOLD, aL, true);
         fNote_ = MakeFormat(f, ui, 13.5f, DWRITE_FONT_WEIGHT_NORMAL, aL, false);
         if (fNote_) {
             fNote_->SetWordWrapping(DWRITE_WORD_WRAPPING_WRAP);
@@ -826,6 +882,10 @@ void Island::DiscardDeviceResources() {
     brush_.Reset();
     shotBitmap_.Reset();
     for (auto& it : shelf_) it.icon.Reset();
+    for (auto& f : favs_) {
+        f.icon.Reset();
+        f.iconTried = false;
+    }
     artBitmap_.Reset();
     rt_.Reset();
 }
@@ -1131,17 +1191,29 @@ void Island::DrawCompactMedia(float w, float h) {
     float pad = 6.f, side = h - pad * 2;
     DrawArt(D2D1::RectF(pad, pad, pad + side, pad + side), 7.f);
     DrawBars(w - 14.f, h / 2, 14.f, 3.f);
-    // Müzik çalarken gözler ritimle hafifçe sallanır.
+    if (sleepEnd_ > 0)  // uyku zamanlayıcısı kurulu: minik ay
+        Text(kGlyphMoon, fIconSmall_.Get(), D2D1::RectF(w - 50, 0, w - 34, h), kGray);
+    // Müzik çalarken gözler ritimle hafifçe sallanır; yeni söz satırında başını sallar.
     float bob = 0.f;
     if (snapshot_.playing) {
         bob = level_ >= 0 ? -beatPulse_ * 2.4f  // vuruşta hop
                           : static_cast<float>(std::sin(time_ * 7.0)) * 1.6f;
     }
+    bob += 1.8f * std::sin(nodPulse_ * 3.14159f);
+    if (w >= kMediaLyric.w - 1.f && HasLyrics()) {
+        // Söz hapı: kapak, Guti, şu anki satır, ekolayzer
+        float ex = pad + side + 22.f;
+        eyes_.Draw(rt_.Get(), d2d_.Get(), brush_.Get(), roundStroke_.Get(), ex, h / 2, 0.62f, bob);
+        D2D1_RECT_F area = D2D1::RectF(ex + 22.f, 0, w - (sleepEnd_ > 0 ? 54.f : 38.f), h);
+        if (lyricLine_ < 0) Text(snapshot_.title.c_str(), fLyric_.Get(), area, kGray);
+        else DrawLyricRows(area, h, true);
+        return;
+    }
     eyes_.Draw(rt_.Get(), d2d_.Get(), brush_.Get(), roundStroke_.Get(), w / 2, h / 2, 0.85f, bob);
 }
 
 void Island::DrawExpandedMedia(float w, float h) {
-    (void)h;
+    DrawAlbumGlow(w, h);  // kart, kapak resminin rengine bürünür
     const float pad = 18.f, art = 64.f;
     float s0 = Stagger(0);
     PushFade(s0, 0, 0, 0.9f + 0.1f * s0, pad + art / 2, pad + art / 2);  // kapak hafifçe büyüyerek gelir
@@ -1157,10 +1229,19 @@ void Island::DrawExpandedMedia(float w, float h) {
     DrawBars(w - pad, pad + 18, 16.f, 3.f);
     PopFade();
 
+    // Şarkı sözleri: önceki, şimdiki, sonraki satır; yeni satır alttan kayarak gelir.
+    float ly = LyricsH();
+    if (ly > 0) {
+        float sl = Stagger(2);
+        PushFade(sl, 0, 5.f * (1 - sl));
+        DrawLyricRows(D2D1::RectF(pad, pad + art + 6.f, w - pad, pad + art + 6.f + 3 * 17.f), 17.f, false);
+        PopFade();
+    }
+
     // İlerleme çubuğu
     float s2 = Stagger(2);
     PushFade(s2, 0, 5.f * (1 - s2));
-    float py = pad + art + 14.f;
+    float py = pad + art + 14.f + ly;
     double dur = snapshot_.durationSec, pos = snapshot_.CurrentPosition();
     bool seeking = sliderDrag_ == 2 && !drawingOld_;
     if (seeking) pos = seekPreview_;
@@ -1239,7 +1320,7 @@ void Island::DrawExpandedMedia(float w, float h) {
 int Island::ButtonAt(float x, float y) const {
     if (view_ != View::ExpandedMedia) return -1;
     const float pad = 18.f, art = 64.f;
-    float cy = pad + art + 14.f + 42.f, cx = viewW_ / 2;
+    float cy = pad + art + 14.f + 42.f + LyricsH(), cx = viewW_ / 2;
     if (std::fabs(y - cy) >= 24) return -1;
     if (std::fabs(x - (cx - 66)) < 24) return 0;
     if (std::fabs(x - cx) < 26) return 1;
@@ -1272,6 +1353,7 @@ void Island::OnMouseMove(float x, float y) {
     if (t != hoverTool_) {
         hoverTool_ = t;
         for (int i = 0; i < kToolCount; ++i) toolGlow_[i].target = i == t ? 1.f : 0.f;
+        for (int i = 0; i <= kFavMax; ++i) favGlow_[i].target = kFavHit + i == t ? 1.f : 0.f;
         StartAnimation();
     }
     // Pano listesinde fareyle gezinmek seçimi de kaydırır.
@@ -1494,12 +1576,17 @@ void Island::DrawAlert(float w, float h) {
 void Island::OnClick(float x, float y) {
     if (ToolsShown(view_)) {
         int t = ToolHit(x, y);
+        if (t >= kFavHit) {
+            if (t == kFavHit + kFavMax) AddFavoriteFromClipboard();
+            else OpenFavorite(t - kFavHit);
+            return;
+        }
         if (t >= 0) {
             RunTool(static_cast<Tool>(t));
             return;
         }
         if (t <= -10) {
-            SetToolPage(-10 - t);
+            SetToolPage(toolPage_ + (t == -10 ? -1 : 1));  // sayfa noktaları: sol önceki, sağ sonraki
             return;
         }
         if (y > ToolsTop()) return;  // araç sırasının boşlukları / raf
@@ -1527,7 +1614,7 @@ void Island::OnClick(float x, float y) {
     }
     if (view_ == View::ExpandedMedia) {
         const float pad = 18.f, art = 64.f;
-        float cy = pad + art + 14.f + 42.f, cx = width_.value / 2;
+        float cy = pad + art + 14.f + 42.f + LyricsH(), cx = width_.value / 2;
         if (std::fabs(y - cy) < 24) {
             if (std::fabs(x - (cx - 66)) < 24) { media_.Send(MediaCommand::Previous); return; }
             if (std::fabs(x - cx) < 26) { media_.Send(MediaCommand::PlayPause); return; }
@@ -1921,7 +2008,8 @@ void Island::DrawScreenshot(float w, float h) {
 
 void Island::DrawDrop(float w, float h) {
     eyes_.Draw(rt_.Get(), d2d_.Get(), brush_.Get(), roundStroke_.Get(), 34, h / 2, 0.85f, 0.f);
-    Text(L"Bırak, Guti tutsun", fAlert_.Get(), D2D1::RectF(66, 0, w - 16, h), kWhite);
+    Text(dropUrl_ ? L"Bırak, favorilere eklesin" : L"Bırak, Guti tutsun", fAlert_.Get(),
+         D2D1::RectF(66, 0, w - 16, h), kWhite);
 }
 
 void Island::OnDropEnter() {
@@ -1933,6 +2021,7 @@ void Island::OnDropEnter() {
 
 void Island::OnDropLeave() {
     dropHover_ = false;
+    dropUrl_ = false;
     dropArmed_ = false;
     eyes_.SetMood(Eyes::Mood::Normal, Now(), 0);
     Update();
@@ -1957,7 +2046,7 @@ void Island::OnDropFiles(const std::vector<std::wstring>& paths) {
 bool Island::ShelfVisible() const { return !shelf_.empty(); }
 
 float Island::ShelfTop() const {
-    return (view_ == View::ExpandedMedia ? kExpandedMedia.h : kExpandedIdle.h) + kToolsH;
+    return (view_ == View::ExpandedMedia ? MediaCardH() : kExpandedIdle.h) + kToolsH;
 }
 
 int Island::ShelfHit(float x, float y) const {
@@ -2025,6 +2114,7 @@ void Island::OnVolume(int percent, bool muted) {
     bool wasMuted = muted_;
     volume_ = percent;
     muted_ = muted;
+    if (sleepFading_ || Now() < volQuietUntil_) return;  // uyku zamanlayıcısı sesi kısıyor
     if (view_ == View::Quick || view_ == View::ExpandedMedia) {  // sürgü zaten gösteriyor
         StartAnimation();
         return;
@@ -2176,6 +2266,14 @@ void Island::EndPicker(bool pick) {
     HWND w = picker_;
     picker_ = nullptr;
     DestroyWindow(w);
+    if (pickForEyes_) {
+        // Guti'nin yeni göz rengi ekrandan seçildi.
+        pickForEyes_ = false;
+        eyes_.SetTint(nullptr);
+        if (pick) SetEyeMode(1, pickColor_);
+        Update();
+        return;
+    }
     if (pick) {
         std::wstring hex = Hex(pickColor_);
         CopyToClipboard(hex);
@@ -2244,6 +2342,15 @@ void Island::RefreshCommandResult() {
     GetLocalTime(&st);
     auto before = cmdResult_.kind;
     cmdResult_ = Command::Evaluate(input_, st.wHour, st.wMinute, st.wSecond);
+    // "fav youtube.com" favorilere ekler, "isim Pıtır" Guti'nin adını değiştirir.
+    std::wstring low = input_.substr(0, 8);
+    if (!low.empty()) CharLowerBuffW(low.data(), static_cast<DWORD>(low.size()));
+    cmdSpecial_ = low.rfind(L"fav ", 0) == 0 ? 1 : (low.rfind(L"isim ", 0) == 0 ? 2 : 0);
+    if (cmdSpecial_) {
+        cmdResult_ = {};
+        cmdResult_.kind = Command::Result::Kind::Value;
+        cmdResult_.display = cmdSpecial_ == 1 ? L"+ favori" : L"\u2665 isim";
+    }
     double now = Now();
     if (cmdResult_.divideByZero) {
         eyes_.SetMood(Eyes::Mood::Dizzy, now, 1.2);  // sıfıra bölünce başı döner
@@ -2300,6 +2407,20 @@ void Island::AcceptCommand() {
             CloseCommand(true);
         } else {
             CloseCommand(true);
+        }
+        return;
+    }
+    if (cmdSpecial_) {
+        int special = cmdSpecial_;
+        std::wstring arg = input_.substr(input_.find(L' ') + 1);
+        cmdSpecial_ = 0;
+        CloseCommand(true);
+        if (special == 2) {
+            SetName(arg);
+        } else if (!AddFavorite(arg)) {
+            eyes_.SetMood(Eyes::Mood::Curious, now, 1.0);  // bunu açamam
+            shake_.velocity += 160.f;
+            StartAnimation();
         }
         return;
     }
@@ -2632,14 +2753,14 @@ void Island::AddTrayIcon() {
     nid.uCallbackMessage = kTrayMsg;
     nid.hIcon = LoadIconW(instance_, MAKEINTRESOURCEW(1));
     if (!nid.hIcon) nid.hIcon = LoadIconW(nullptr, IDI_APPLICATION);
-    wcscpy_s(nid.szTip, L"Dynamis Island");
+    swprintf_s(nid.szTip, L"%s · Dynamis Island", name_.c_str());
     Shell_NotifyIconW(NIM_ADD, &nid);
 }
 
 void Island::ShowTrayMenu() {
     HMENU menu = CreatePopupMenu();
     wchar_t title[128];
-    swprintf_s(title, L"Guti  v%d   ·   dostluk %d/100", Updater::kCurrentVersion,
+    swprintf_s(title, L"%s  v%d   ·   dostluk %d/100", name_.c_str(), Updater::kCurrentVersion,
                companion_.Affection());
     if (btLevel_ != 255) {
         wchar_t extra[48];
@@ -2670,6 +2791,26 @@ void Island::ShowTrayMenu() {
         wcscpy_s(updateLabel, L"Güncelleştir");
     AppendMenuW(settings, MF_STRING | (Sounds::Enabled() ? MF_CHECKED : 0), kCmdSounds, L"Sesler");
     AppendMenuW(settings, MF_STRING | (volumeOsd_ ? MF_CHECKED : 0), kCmdVolumeOsd, L"Ses düzeyi göstergesi");
+    AppendMenuW(settings, MF_STRING | (albumTint_ ? MF_CHECKED : 0), kCmdAlbumTint, L"Albüm rengi");
+    AppendMenuW(settings, MF_STRING | (lyricsOn_ ? MF_CHECKED : 0), kCmdLyrics, L"Şarkı sözleri (internetten)");
+    AppendMenuW(settings, MF_STRING | (lyricsPill_ ? MF_CHECKED : 0) | (lyricsOn_ ? 0 : MF_GRAYED), kCmdLyricsPill,
+                L"Kapalı adada şarkı sözü");
+    {
+        HMENU eyesMenu = CreatePopupMenu();
+        for (int i = 0; i < static_cast<int>(std::size(kEyePresets)); ++i) {
+            bool on = i == 0 ? eyeMode_ == 0 : (eyeMode_ == 1 && eyeRgb_ == kEyePresets[i].rgb);
+            AppendMenuW(eyesMenu, MF_STRING | (on ? MF_CHECKED : 0), kCmdEyeWhite + i, kEyePresets[i].name);
+        }
+        AppendMenuW(eyesMenu, MF_SEPARATOR, 0, nullptr);
+        AppendMenuW(eyesMenu, MF_STRING | (eyeMode_ == 2 ? MF_CHECKED : 0), kCmdEyeAccent, L"Windows vurgu rengine uy");
+        AppendMenuW(eyesMenu, MF_STRING, kCmdEyePick, L"Ekrandan seç…");
+        AppendMenuW(settings, MF_POPUP, reinterpret_cast<UINT_PTR>(eyesMenu), L"Göz rengi");
+    }
+    {
+        wchar_t renameLabel[64];
+        swprintf_s(renameLabel, L"Adını değiştir (%s)…", name_.c_str());
+        AppendMenuW(settings, MF_STRING, kCmdRename, renameLabel);
+    }
     AppendMenuW(settings, MF_STRING, kCmdUpdate, updateLabel);
     bool focusing = companion_.Kind() == Companion::TimerKind::Focus ||
                     companion_.Kind() == Companion::TimerKind::Break;
@@ -2682,6 +2823,15 @@ void Island::ShowTrayMenu() {
     AppendMenuW(menu, MF_STRING, kCmdNote, L"Not\tCtrl+Alt+N");
     AppendMenuW(menu, MF_STRING | (ink_ ? MF_CHECKED : 0), kCmdInk, L"Ekrana çiz\tCtrl+Alt+P");
     AppendMenuW(menu, MF_STRING | (coffee_ ? MF_CHECKED : 0), kCmdCoffee, L"Uyanık tut (kahve)");
+    {
+        wchar_t sleepLabel[64];
+        if (sleepEnd_ > 0)
+            swprintf_s(sleepLabel, L"Uyku zamanlayıcısı: %d dk kaldı (değiştir)",
+                       static_cast<int>(std::ceil(std::max(0.0, sleepEnd_ - Now()) / 60.0)));
+        else
+            wcscpy_s(sleepLabel, L"Müzik uyku zamanlayıcısı (15 dk)");
+        AppendMenuW(menu, MF_STRING | (sleepEnd_ > 0 ? MF_CHECKED : 0), kCmdSleep, sleepLabel);
+    }
     if (!shelf_.empty()) AppendMenuW(menu, MF_STRING, kCmdClearShelf, L"Rafı boşalt");
     AppendMenuW(menu, MF_STRING, kCmdFocus, focusing ? L"Odak modunu bitir" : focusLabel);
     if (companion_.Kind() == Companion::TimerKind::Quick)
@@ -2725,6 +2875,41 @@ void Island::ShowTrayMenu() {
     if (cmd == kCmdCommand) {
         if (userHidden_) ToggleUserHidden();
         OpenCommand();
+    }
+    if (cmd == kCmdAlbumTint) {
+        albumTint_ = !albumTint_;
+        WriteSetting(L"AlbumTint", albumTint_ ? 1 : 0);
+        StartAnimation();
+    }
+    if (cmd == kCmdLyrics) {
+        lyricsOn_ = !lyricsOn_;
+        WriteSetting(L"Lyrics", lyricsOn_ ? 1 : 0);
+        lyricsKey_.clear();  // açıldıysa şimdiki şarkı için hemen ara
+        if (lyricsOn_) OnMediaForLyrics();
+        else lyrics_.clear();
+        Update();
+    }
+    if (cmd == kCmdLyricsPill) {
+        lyricsPill_ = !lyricsPill_;
+        WriteSetting(L"LyricsPill", lyricsPill_ ? 1 : 0);
+        Update();
+    }
+    if (cmd == kCmdSleep) CycleSleep();
+    if (cmd >= kCmdEyeWhite && cmd < kCmdEyeWhite + std::size(kEyePresets)) {
+        size_t i = cmd - kCmdEyeWhite;
+        SetEyeMode(i == 0 ? 0 : 1, kEyePresets[i].rgb);
+    }
+    if (cmd == kCmdEyeAccent) SetEyeMode(2, eyeRgb_);
+    if (cmd == kCmdEyePick) {
+        pickForEyes_ = true;
+        StartPicker();
+        if (!picker_) pickForEyes_ = false;
+    }
+    if (cmd == kCmdRename) {
+        if (userHidden_) ToggleUserHidden();
+        OpenCommand();
+        input_ = L"isim ";
+        RefreshCommandResult();
     }
     if (cmd == kCmdExit) DestroyWindow(hwnd_);
 }
@@ -2874,6 +3059,28 @@ LRESULT Island::WndProc(UINT msg, WPARAM wp, LPARAM lp) {
         OnMouseMove(GET_X_LPARAM(lp) / scale_ - kPad, GET_Y_LPARAM(lp) / scale_);
         return 0;
 
+    case WM_RBUTTONUP:
+        // Favori kutucuğuna sağ tık: favoriden çıkar.
+        if (ToolsShown(view_)) {
+            int t = ToolHit(GET_X_LPARAM(lp) / scale_ - kPad, GET_Y_LPARAM(lp) / scale_);
+            if (t >= kFavHit && t < kFavHit + kFavMax) RemoveFavorite(t - kFavHit);
+        }
+        return 0;
+
+    case Lyrics::WM_LYRICS:
+        OnLyrics(reinterpret_cast<Lyrics::Result*>(lp));
+        return 0;
+
+    case WM_FAVICON: {
+        std::unique_ptr<std::wstring> domain(reinterpret_cast<std::wstring*>(lp));
+        if (domain) OnFavicon(*domain);
+        return 0;
+    }
+
+    case WM_DWMCOLORIZATIONCOLORCHANGED:
+        if (eyeMode_ == 2) ApplyEyeColor();  // Windows vurgu rengi değişti
+        return 0;
+
     case WM_CAPTURECHANGED:
         if (sliderDrag_ >= 0 && reinterpret_cast<HWND>(lp) != hwnd_) {
             sliderDrag_ = -1;
@@ -2888,6 +3095,7 @@ LRESULT Island::WndProc(UINT msg, WPARAM wp, LPARAM lp) {
         mediaHover_ = -1;
         for (auto& g : btnGlow_) g.target = 0.f;
         for (auto& g : toolGlow_) g.target = 0.f;
+        for (auto& g : favGlow_) g.target = 0.f;
         if (pressBtn_ >= 0) btnScale_[pressBtn_].target = 1.f;
         pressBtn_ = -1;
         StartAnimation();
@@ -2981,6 +3189,16 @@ LRESULT Island::WndProc(UINT msg, WPARAM wp, LPARAM lp) {
             eyes_.SetTint(nullptr);
             StartAnimation();
             break;
+        case kTimerLyrics: StartLyricsFetch(); break;
+        case kTimerSleepRestore:
+            KillTimer(hwnd_, kTimerSleepRestore);
+            if (sleepRestoreVol_ >= 0) {
+                volQuietUntil_ = Now() + 1.5;
+                VolumeWatch::Set(sleepRestoreVol_);
+            }
+            sleepRestoreVol_ = -1;
+            sleepFading_ = false;
+            break;
         case kTimerAlert:
             KillTimer(hwnd_, kTimerAlert);
             if (IsFileCard() && hover_) {
@@ -2994,6 +3212,7 @@ LRESULT Island::WndProc(UINT msg, WPARAM wp, LPARAM lp) {
             CheckFullscreen();
             if (CheckSlim()) Update();
             OnCompanionTick();
+            OnSleepTick();
             OnPrivacyTick();
             CheckReminders();
             UpdatePerf();
@@ -3021,8 +3240,9 @@ LRESULT Island::WndProc(UINT msg, WPARAM wp, LPARAM lp) {
         if (snapshot_.artVersion != artVersion_) {
             artVersion_ = snapshot_.artVersion;
             artBitmap_.Reset();
-            accent_ = AccentFromArt(snapshot_.art.Get());
+            SetAccent(AccentFromArt(snapshot_.art.Get()));
         }
+        OnMediaForLyrics();
         if (snapshot_.title != lastTitle_) {
             if (!lastTitle_.empty() || !snapshot_.title.empty()) {
                 eyes_.SetMood(Eyes::Mood::Surprised, Now(), 0.6);  // yeni şarkı!
@@ -3181,6 +3401,7 @@ LRESULT Island::WndProc(UINT msg, WPARAM wp, LPARAM lp) {
 
     case WM_DESTROY: {
         companion_.Save();
+        if (sleepFading_ && sleepRestoreVol_ >= 0) VolumeWatch::Set(sleepRestoreVol_);
         if (noteMode_) SaveNote();
         if (ink_) EndInk();
         if (coffee_) SetThreadExecutionState(ES_CONTINUOUS);

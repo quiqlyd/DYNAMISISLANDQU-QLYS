@@ -15,6 +15,7 @@
 #include "Command.h"
 #include "Companion.h"
 #include "Eyes.h"
+#include "Lyrics.h"
 #include "MediaService.h"
 #include "Spring.h"
 #include "Watchers.h"
@@ -96,8 +97,12 @@ private:
 
 public:
     // Araç çentiği (Tools.cpp): araç ızgarası, yazı tanıma, kahve, not, ekrana çizim, hızlı ayarlar
-    enum class Tool { Ocr, Shot, Picker, Coffee, Note, Ink, Quick, Focus, Calc, Sounds, Update, Count };
+    enum class Tool { Ocr, Shot, Picker, Coffee, Note, Ink, Quick, Focus, Calc, Sounds, Update, Sleep, Count };
     static constexpr int kToolCount = static_cast<int>(Tool::Count);
+    // Favori siteler: araç ızgarasının son sayfası. ToolHit bunlar için kFavHit + sıra döndürür,
+    // "+" kutucuğu için kFavHit + kFavMax.
+    static constexpr int kFavMax = 6, kFavHit = 100;
+    static constexpr UINT WM_FAVICON = WM_APP + 31;  // lParam = new std::wstring(alan adı)
 
 private:
     bool Typing() const { return commandMode_ || noteMode_; }
@@ -148,6 +153,36 @@ private:
     bool CheckSlim();
     int MediaHit(float x, float y) const;  // 20: ilerleme çubuğu, 21: ses
     void MediaSlider(int which, float x);
+
+    // Albüm rengi, şarkı sözleri, favoriler, göz rengi, isim, uyku zamanlayıcısı (Extras.cpp)
+    D2D1_COLOR_F CardAccent() const;
+    void SetAccent(D2D1_COLOR_F c);
+    void DrawAlbumGlow(float w, float h);
+    bool HasLyrics() const { return lyricsOn_ && !lyrics_.empty(); }
+    float LyricsH() const;     // açık müzik kartındaki söz alanı (0: yok)
+    float MediaCardH() const;  // açık müzik kartının araçlardan önceki yüksekliği
+    bool LyricPill() const;    // kapalı müzik hapında söz satırı
+    void OnMediaForLyrics();
+    void StartLyricsFetch();
+    void OnLyrics(Lyrics::Result* r);
+    void UpdateLyricLine(double now);
+    void DrawLyricRows(D2D1_RECT_F area, float rowH, bool compact);
+    void LoadFavorites();
+    void SaveFavorites();
+    bool AddFavorite(std::wstring target);
+    void RemoveFavorite(int i);
+    void OpenFavorite(int i);
+    void AddFavoriteFromClipboard();
+    ID2D1Bitmap* FavoriteIcon(size_t i);
+    void OnFavicon(const std::wstring& domain);
+    void DrawFavorites(float x0, float y0, float off);
+    void OnDropUrl(const std::wstring& url);
+    void LoadLook();
+    void SetEyeMode(int mode, COLORREF rgb);
+    void ApplyEyeColor();
+    void SetName(std::wstring name);
+    void CycleSleep();
+    void OnSleepTick();
 
     // Çizim
     bool CreateGpu();
@@ -398,4 +433,40 @@ private:
     double seekPreview_ = 0;
     int mediaHover_ = -1;
     double brightSetAt_ = -1e9;  // son elle ayar: eski yankılar sürgüyü geri itmesin
+
+    // Albüm rengi kartı: renk değişince eskisinden yenisine yumuşakça geçer
+    D2D1_COLOR_F accentFrom_{0.62f, 0.80f, 1.f, 1.f};
+    double accentAt_ = -10;
+    bool albumTint_ = true;
+    // Şarkı sözleri
+    std::vector<Lyrics::Line> lyrics_;
+    bool lyricsOn_ = true, lyricsPill_ = true;
+    uint64_t lyricsToken_ = 0;
+    std::wstring lyricsKey_;
+    int lyricLine_ = -1;
+    double lyricAt_ = -10;
+    float nodPulse_ = 0.f;  // satır değişince Guti'nin minik baş sallaması
+    double lastChorus_ = -1e9;
+    Microsoft::WRL::ComPtr<IDWriteTextFormat> fLyric_;
+    // Favoriler
+    struct Favorite {
+        std::wstring target, label, domain;
+        Microsoft::WRL::ComPtr<ID2D1Bitmap> icon;
+        bool iconTried = false;
+    };
+    std::vector<Favorite> favs_;
+    Spring favGlow_[kFavMax + 1];
+    bool dropUrl_ = false;  // sürüklenen şey bir bağlantı
+    // Görünüş: göz rengi (0 beyaz, 1 seçilen renk, 2 Windows vurgu rengi) ve isim
+    bool pickForEyes_ = false;
+    int eyeMode_ = 0;
+    COLORREF eyeRgb_ = RGB(255, 255, 255);
+    std::wstring name_ = L"Guti";
+    int cmdSpecial_ = 0;  // komut çubuğu: 1 favori ekle, 2 isim
+    // Müzik uyku zamanlayıcısı
+    double sleepEnd_ = 0;
+    int sleepMinutes_ = 0;
+    int sleepRestoreVol_ = -1;
+    bool sleepFading_ = false;
+    double volQuietUntil_ = 0;  // kendi yaptığımız ses değişikliklerinde gösterge açılmasın
 };
