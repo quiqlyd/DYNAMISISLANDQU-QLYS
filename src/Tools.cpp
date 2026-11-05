@@ -745,6 +745,7 @@ void Island::DrawInkBar(float w, float h) {
 
 void Island::OpenQuick() {
     quickOpen_ = true;
+    nightLight_ = NightLight::State();
     Radios::Refresh(hwnd_);
     Brightness::Refresh(hwnd_);
     int v = 0;
@@ -815,10 +816,16 @@ void Island::QuickClick(int hit) {
         break;
     }
     case 2:
-        AllowSetForegroundWindow(ASFW_ANY);
-        ShellExecuteW(nullptr, L"open", L"ms-settings:nightlight", nullptr, nullptr, SW_SHOWNORMAL);
-        eyes_.SetMood(Eyes::Mood::Sleepy, now, 1.0);
-        hover_ = false;
+        if (NightLight::Toggle()) {
+            nightLight_ = NightLight::State();
+            if (nightLight_ == 1) eyes_.SetMood(Eyes::Mood::Sleepy, now, 1.2);  // sıcak ışık: göz kapakları ağırlaşır
+            else MoodWithSound(Eyes::Mood::Happy, 0.8);
+        } else {
+            // Bu Windows'ta kayıt biçimi tanınmadı: dokunma, Ayarlar'ı aç.
+            AllowSetForegroundWindow(ASFW_ANY);
+            ShellExecuteW(nullptr, L"open", L"ms-settings:nightlight", nullptr, nullptr, SW_SHOWNORMAL);
+            hover_ = false;
+        }
         break;
     case 3: SetCoffee(!coffee_); break;
     case 20:
@@ -853,7 +860,7 @@ void Island::DrawQuick(float w, float h) {
     QTile tiles[4] = {
         {kGlyphWifi, L"Wi-Fi", radioState(Radios::kWifi, Radios::kWifiOn), radios_ > 0 && (radios_ & Radios::kWifiOn)},
         {kGlyphBluetooth, L"Bluetooth", radioState(Radios::kBt, Radios::kBtOn), radios_ > 0 && (radios_ & Radios::kBtOn)},
-        {kGlyphMoon, L"Gece ışığı", L"Ayarla", false},
+        {kGlyphMoon, L"Gece ışığı", nightLight_ < 0 ? L"Ayarla" : (nightLight_ ? L"Açık" : L"Kapalı"), nightLight_ == 1},
         {kGlyphCafe, L"Kahve", coffee_ ? L"Uyanık" : L"Kapalı", coffee_},
     };
     for (int i = 0; i < 4; ++i) {
