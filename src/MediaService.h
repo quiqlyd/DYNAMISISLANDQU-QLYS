@@ -34,7 +34,7 @@ class MediaService {
 public:
     static constexpr UINT WM_MEDIA_CHANGED = WM_APP + 1;
 
-    void Start(HWND notifyWindow, IWICImagingFactory* wic);
+    void Start(HWND notifyWindow);
     MediaSnapshot Snapshot();
     void Send(MediaCommand cmd);
 

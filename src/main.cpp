@@ -1,6 +1,7 @@
 #include <windows.h>
 #include <winrt/base.h>
 #include <cwchar>
+#include <ole2.h>
 
 #include "Island.h"
 #include "Updater.h"
@@ -18,7 +19,11 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, PWSTR cmdLine, int) {
     Updater::CleanupOldFiles();
 
     SetProcessDpiAwarenessContext(DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2);
-    winrt::init_apartment(winrt::apartment_type::multi_threaded);
+    // Arayüz iş parçacığı STA: dosyayı adadan sürükleyip bırakmak (OLE) bunu ister.
+    // Medya dinleyicileri kendi MTA iş parçacıklarında çalışır; MTA'yı süreç boyunca canlı tut.
+    OleInitialize(nullptr);
+    CO_MTA_USAGE_COOKIE mtaCookie{};
+    CoIncrementMTAUsage(&mtaCookie);
 
     static Island island;  // arka plan iş parçacıkları süreç sonuna kadar erişebilir
     if (!island.Create(instance)) {

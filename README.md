@@ -14,6 +14,10 @@ Windows 11 için Dinamik Ada (ve ileride modern taskbar). C++ ve saf Win32 + Dir
 - Üzerine gelince açılır: müzik yoksa büyük saat, tarih, pil ve gözler
 - Şarj takıldı / çıkarıldı / pil azaldı uyarıları
 - Oyun veya tam ekran video açıkken kendini gizler
+- **Guti'nin duyuları:** işlemci zorlanınca terler, bellek dolunca başı döner, internet gidince üzülür, gelince sevinir
+- Kamera veya mikrofon açıkken adada küçük nokta (yeşil kamera, turuncu mikrofon); Guti merakla bakar
+- Ekran görüntüsü alınca göz kırpar ve minik deklanşör sesi çıkarır
+- İndirme bitince kart çıkar: tıkla klasörde göster, ya da dosyayı adadan sürükleyip istediğin yere bırak
 - Sağ alttaki tepsi simgesine sağ tık: **Windows ile başlat** ve **Çıkış**
 
 ## İndirme
