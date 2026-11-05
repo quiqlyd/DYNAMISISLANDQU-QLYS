@@ -7,6 +7,7 @@
 #include <chrono>
 #include <string>
 
+#include "Companion.h"
 #include "Eyes.h"
 #include "MediaService.h"
 #include "Spring.h"
@@ -19,8 +20,8 @@ public:
     int Run();
 
 private:
-    enum class View { Idle, Media, ExpandedMedia, ExpandedIdle, Alert };
-    enum class AlertKind { Charging, Unplugged, LowBattery, UpdateAvailable, Updating, UpToDate, UpdateFailed };
+    enum class View { Idle, Media, ExpandedMedia, ExpandedIdle, Alert, Timer };
+    enum class AlertKind { Charging, Unplugged, LowBattery, UpdateAvailable, Updating, UpToDate, UpdateFailed, TimerDone, FocusDone, BreakDone };
 
     static LRESULT CALLBACK StaticWndProc(HWND, UINT, WPARAM, LPARAM);
     LRESULT WndProc(UINT msg, WPARAM wp, LPARAM lp);
@@ -49,6 +50,9 @@ private:
     void DrawExpandedMedia(float w, float h);
     void DrawExpandedIdle(float w, float h);
     void DrawAlert(float w, float h);
+    void DrawTimer(float w, float h);
+    std::wstring TimerText() const;
+    D2D1_COLOR_F TimerColor() const;
     void DrawArt(D2D1_RECT_F rect, float radius);
     void DrawBars(float right, float centerY, float maxHeight, float barWidth);
     void Text(const wchar_t* text, IDWriteTextFormat* format, D2D1_RECT_F rect,
@@ -59,6 +63,9 @@ private:
     void OnClick(float x, float y);
     void OnLookTimer();
     void Pet();
+    void MoodWithSound(Eyes::Mood mood, double duration);
+    void OnCompanionTick();
+    void SetHover(bool hover);
     double Now() const;
     bool ViewShowsEyes() const;
 
@@ -130,4 +137,8 @@ private:
     int clickStreak_ = 0;
     bool lastPlaying_ = false;
     std::wstring lastTitle_;
+
+    // Guti'nin beyni: zamanlayıcı, odak, mola, dostluk
+    Companion companion_;
+    double reunionAt_ = 0;
 };

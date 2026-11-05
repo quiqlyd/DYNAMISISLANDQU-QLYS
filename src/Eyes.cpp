@@ -9,21 +9,25 @@ using Microsoft::WRL::ComPtr;
 
 namespace {
 // Duygu tablosu. Sıra Mood enum'u ile aynı olmalı.
-//                     open  lidT  brow  lidB  happy heart blush tear  wink  spark asym  follow blink anim
-const float kRows[][11] = {
-    /* Normal    */ {1.00f, 0.00f, 0.00f, 0.00f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.00f},
-    /* Happy     */ {1.00f, 0.00f, 0.00f, 0.00f, 1.0f, 0.0f, 0.3f, 0.0f, 0.0f, 0.0f, 0.00f},
-    /* Laugh     */ {1.00f, 0.00f, 0.00f, 0.00f, 1.0f, 0.0f, 0.6f, 0.0f, 0.0f, 0.0f, 0.00f},
-    /* Love      */ {1.00f, 0.00f, 0.00f, 0.00f, 0.0f, 1.0f, 0.8f, 0.0f, 0.0f, 0.0f, 0.00f},
-    /* Cute      */ {1.18f, 0.00f, 0.00f, 0.22f, 0.0f, 0.0f, 0.9f, 0.0f, 0.0f, 1.0f, 0.00f},
-    /* Angry     */ {0.95f, 0.42f, 0.85f, 0.00f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.00f},
-    /* Sad       */ {0.95f, 0.30f, -0.8f, 0.00f, 0.0f, 0.0f, 0.0f, 1.0f, 0.0f, 0.0f, 0.00f},
-    /* Surprised */ {1.28f, 0.00f, 0.00f, 0.00f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.4f, 0.00f},
-    /* Wink      */ {1.00f, 0.00f, 0.00f, 0.00f, 0.0f, 0.0f, 0.4f, 0.0f, 1.0f, 0.0f, 0.00f},
-    /* Curious   */ {1.00f, 0.00f, 0.00f, 0.00f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 1.00f},
-    /* Glance    */ {1.00f, 0.00f, 0.00f, 0.00f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.00f},
-    /* Dizzy     */ {1.00f, 0.00f, 0.00f, 0.00f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.00f},
-    /* Sleepy    */ {0.12f, 0.00f, 0.00f, 0.00f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.00f},
+//                     open  lidT  brow  lidB  happy heart blush tear  wink  spark asym   sweat
+const float kRows[][12] = {
+    /* Normal    */ {1.00f, 0.00f, 0.00f, 0.00f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.00f, 0.0f},
+    /* Happy     */ {1.00f, 0.00f, 0.00f, 0.00f, 1.0f, 0.0f, 0.3f, 0.0f, 0.0f, 0.0f, 0.00f, 0.0f},
+    /* Laugh     */ {1.00f, 0.00f, 0.00f, 0.00f, 1.0f, 0.0f, 0.6f, 0.0f, 0.0f, 0.0f, 0.00f, 0.0f},
+    /* Love      */ {1.00f, 0.00f, 0.00f, 0.00f, 0.0f, 1.0f, 0.8f, 0.0f, 0.0f, 0.0f, 0.00f, 0.0f},
+    /* Cute      */ {1.18f, 0.00f, 0.00f, 0.22f, 0.0f, 0.0f, 0.9f, 0.0f, 0.0f, 1.0f, 0.00f, 0.0f},
+    /* Angry     */ {0.95f, 0.42f, 0.85f, 0.00f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.00f, 0.0f},
+    /* Sad       */ {0.95f, 0.30f, -0.8f, 0.00f, 0.0f, 0.0f, 0.0f, 1.0f, 0.0f, 0.0f, 0.00f, 0.0f},
+    /* Surprised */ {1.28f, 0.00f, 0.00f, 0.00f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.4f, 0.00f, 0.0f},
+    /* Wink      */ {1.00f, 0.00f, 0.00f, 0.00f, 0.0f, 0.0f, 0.4f, 0.0f, 1.0f, 0.0f, 0.00f, 0.0f},
+    /* Curious   */ {1.00f, 0.00f, 0.00f, 0.00f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 1.00f, 0.0f},
+    /* Glance    */ {1.00f, 0.00f, 0.00f, 0.00f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.00f, 0.0f},
+    /* Dizzy     */ {1.00f, 0.00f, 0.00f, 0.00f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.00f, 0.0f},
+    /* Sleepy    */ {0.12f, 0.00f, 0.00f, 0.00f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.00f, 0.0f},
+    /* Yawn      */ {0.30f, 0.15f, -0.4f, 0.00f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.00f, 0.0f},
+    /* Sulk      */ {0.90f, 0.32f, 0.45f, 0.00f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.00f, 0.0f},
+    /* Focused   */ {0.85f, 0.26f, 0.30f, 0.00f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.00f, 0.0f},
+    /* Sweaty    */ {0.85f, 0.22f, -0.5f, 0.00f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.00f, 1.0f},
 };
 //                         follow blinks animated
 const bool kFlags[][3] = {
@@ -40,6 +44,10 @@ const bool kFlags[][3] = {
     /* Glance    */ {false, true, true},
     /* Dizzy     */ {false, false, false},
     /* Sleepy    */ {false, false, false},
+    /* Yawn      */ {false, false, false},
+    /* Sulk      */ {false, true, false},
+    /* Focused   */ {true, true, false},
+    /* Sweaty    */ {true, true, true},
 };
 static_assert(sizeof(kRows) / sizeof(kRows[0]) == static_cast<size_t>(Eyes::Mood::Count));
 static_assert(sizeof(kFlags) / sizeof(kFlags[0]) == static_cast<size_t>(Eyes::Mood::Count));
@@ -61,7 +69,7 @@ const Eyes::Style& Eyes::StyleOf(Mood m) {
         for (int i = 0; i < static_cast<int>(Mood::Count); ++i) {
             const float* r = kRows[i];
             styles[i] = Style{r[0], r[1], r[2], r[3], r[4], r[5], r[6], r[7], r[8], r[9], r[10],
-                              kFlags[i][0], kFlags[i][1], kFlags[i][2]};
+                              r[11], kFlags[i][0], kFlags[i][1], kFlags[i][2]};
         }
         built = true;
     }
@@ -73,7 +81,7 @@ Eyes::Eyes() : rng_(std::random_device{}()) {
     Tune(lookY_, 140, 18);
     Tune(open_, 900, 42);  // kırpma hızlı olsun
     for (Spring* s : {&lidTop_, &brow_, &lidBottom_, &happy_, &heart_, &blush_, &tear_, &wink_,
-                      &sparkle_, &asym_, &dizzy_})
+                      &sparkle_, &asym_, &dizzy_, &sweat_})
         Tune(*s, 260, 26);
     Tune(heart_, 380, 20);  // kalpler hafif "pıt" diye çıksın
     open_.Snap(1.f);
@@ -113,6 +121,7 @@ void Eyes::UpdateTargets(double now) {
     wink_.target = s.wink;
     sparkle_.target = s.sparkle;
     asym_.target = s.asym;
+    sweat_.target = s.sweat;
     dizzy_.target = mood_ == Mood::Dizzy ? 1.f : 0.f;
 
     if (mood_ == Mood::Glance) {
@@ -120,12 +129,16 @@ void Eyes::UpdateTargets(double now) {
         double t = now - moodStart_;
         lookX_.target = t < 0.6 ? -1.f : (t < 1.3 ? 1.f : 0.f);
         lookY_.target = -0.3f;
+    } else if (mood_ == Mood::Sulk) {
+        lookX_.target = 1.f;  // küstü: başını çevirir
+        lookY_.target = -0.2f;
     } else if (s.follow) {
         lookX_.target = wantX_;
         lookY_.target = wantY_;
     } else {
         lookX_.target = 0.f;
-        lookY_.target = mood_ == Mood::Sleepy || mood_ == Mood::Sad ? 0.5f : 0.f;
+        lookY_.target = mood_ == Mood::Sleepy || mood_ == Mood::Sad ? 0.5f
+                        : mood_ == Mood::Yawn ? -0.4f : 0.f;
     }
 }
 
@@ -144,8 +157,11 @@ bool Eyes::Tick(double now) {
 
     // Kendi kendine şirinlik: arada bir göz kırpar, bakınır, meraklanır.
     if (mood_ == Mood::Normal && now >= nextIdleAct_) {
-        std::uniform_int_distribution<int> pick(0, 5);
+        // Dostluk arttıkça daha sık ve daha sevgi dolu şirinlik yapar.
+        std::uniform_int_distribution<int> pick(0, affection_ >= 70 ? 7 : 5);
         switch (pick(rng_)) {
+        case 6: SetMood(Mood::Love, now, 1.6); break;
+        case 7: SetMood(Mood::Cute, now, 2.2); break;
         case 0: SetMood(Mood::Wink, now, 0.5); break;
         case 1: SetMood(Mood::Glance, now, 1.9); break;
         case 2: SetMood(Mood::Curious, now, 1.8); break;
@@ -153,7 +169,8 @@ bool Eyes::Tick(double now) {
         case 4: SetMood(Mood::Happy, now, 1.2); break;
         default: SetMood(Mood::Glance, now, 1.9); break;
         }
-        std::uniform_real_distribution<double> gap(25.0, 60.0);
+        double scale = 1.4 - std::clamp(affection_, 0, 100) / 100.0 * 0.8;  // 1.4x .. 0.6x
+        std::uniform_real_distribution<double> gap(25.0 * scale, 60.0 * scale);
         nextIdleAct_ = now + gap(rng_);
     }
 
@@ -172,7 +189,7 @@ bool Eyes::Step(double now, float dt) {
     animTime_ += dt;
     bool moving = false;
     for (Spring* s : {&lookX_, &lookY_, &open_, &lidTop_, &brow_, &lidBottom_, &happy_, &heart_,
-                      &blush_, &tear_, &wink_, &sparkle_, &asym_, &dizzy_})
+                      &blush_, &tear_, &wink_, &sparkle_, &asym_, &dizzy_, &sweat_})
         moving |= s->Step(dt);
     return moving || blinkEnd_ > now || StyleOf(mood_).animated;
 }
@@ -231,7 +248,8 @@ void Eyes::Draw(ID2D1RenderTarget* rt, ID2D1Factory* f, ID2D1SolidColorBrush* br
           dizzy = c01(dizzy_.value), blush = c01(blush_.value), tear = c01(tear_.value),
           wink = c01(wink_.value), sparkle = c01(sparkle_.value), lidTop = c01(lidTop_.value),
           lidBottom = c01(lidBottom_.value), brow = std::clamp(brow_.value, -1.f, 1.f),
-          asym = std::clamp(asym_.value, -1.f, 1.f), open = std::max(0.f, open_.value);
+          asym = std::clamp(asym_.value, -1.f, 1.f), open = std::max(0.f, open_.value),
+          sweat = c01(sweat_.value);
 
     // Gülerken kıkır kıkır zıplar.
     if (mood_ == Mood::Laugh) bob += static_cast<float>(std::sin(animTime_ * 28.0)) * 1.4f * u;
@@ -332,6 +350,17 @@ void Eyes::Draw(ID2D1RenderTarget* rt, ID2D1Factory* f, ID2D1SolidColorBrush* br
         if (arcAlpha > 0.01f) {
             brush->SetColor(A(kEye, arcAlpha));
             Arc(rt, f, brush, round, ex, ey, eyeW * 0.75f, 6.f * u, 2.6f * u);
+        }
+
+        // Ter damlası: sağ gözün üst dış köşesinde, yavaşça kayar.
+        if (sweat > 0.01f && side == 1) {
+            float t = static_cast<float>(std::fmod(animTime_ * 0.5, 1.0));
+            float sx = ex + eyeW * 0.9f, sy = ey - eyeH * 0.55f + t * 3.f * u;
+            brush->SetColor(A(kTear, sweat * 0.9f));
+            D2D1_POINT_2F drop[] = {{sx, sy - 2.4f * u}, {sx + 1.5f * u, sy + 0.5f * u},
+                                    {sx - 1.5f * u, sy + 0.5f * u}};
+            FillPath(rt, f, brush, drop, 3);
+            rt->FillEllipse(D2D1::Ellipse(D2D1::Point2F(sx, sy + 0.8f * u), 1.5f * u, 1.5f * u), brush);
         }
 
         // Gözyaşı: dış köşeden süzülen damla (sadece bir gözde).
