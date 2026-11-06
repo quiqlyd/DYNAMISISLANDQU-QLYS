@@ -60,6 +60,7 @@ constexpr UINT_PTR kTimerAutoHide = 5;   // otomatik gizlemede fare ekranın alt
 constexpr UINT_PTR kTimerBlink = 6;      // mini Guti ara sıra göz kırpar
 constexpr UINT_PTR kTimerTrayPeek = 8;   // gizli simgeler kapanınca taskbar yine gizlenir
 constexpr UINT_PTR kTimerClock = 9;      // saat dakika değişince yeniden çizilir
+constexpr UINT_PTR kTimerFly = 10;       // açılan Windows panelini dock'un üstüne taşır
 constexpr UINT_PTR kTimerWatch = 7;      // kare akışı takılırsa animasyonu yine de yürütür
 
 constexpr wchar_t kPinnedDir[] = L"\\Microsoft\\Internet Explorer\\Quick Launch\\User Pinned\\TaskBar";
@@ -993,6 +994,7 @@ void Dock::OnClick(int i) {
     }
     if (a.isControl) {
         int part = TrayPart(mouseX_);
+        if (part >= 0) BeginFlyout((trayX_[part] + trayX_[part + 1]) / 2.f);
         if (part == 0) OpenHiddenIcons();
         else if (part == 1) SendWinKey('A');   // Hızlı ayarlar: ağ, ses, Bluetooth
         else if (part == 2) SendWinKey('N');   // Bildirimler ve takvim
@@ -1859,6 +1861,8 @@ LRESULT Dock::OnOverlay(UINT msg, WPARAM wp, LPARAM lp) {
                 in[1].ki.dwFlags = KEYEVENTF_KEYUP;
                 SendInput(2, in, sizeof(INPUT));
             }
+        } else if (wp == kTimerFly) {
+            MoveFlyouts();
         } else if (wp == kTimerWatch) {
             // Ekran kartının dikey senkron beklemesi bazı sistemlerde kare göndermeyi kesebiliyor:
             // animasyon sürerken 80 ms kare gelmezse kareyi buradan çizeriz.
@@ -1959,6 +1963,7 @@ LRESULT Dock::OnOverlay(UINT msg, WPARAM wp, LPARAM lp) {
         toDock(lp, &x, &y);
         int hit = HitTest(x, y);
         if (hit == 0) {
+            BeginFlyout(apps_[0].x);
             SendWinKey('X');  // Windows logosu: Windows'un kendi sağ tık menüsü
         } else if (hit >= 2 && !apps_[hit].isControl) {
             ShowAppMenu(hit);
@@ -2293,6 +2298,64 @@ void Dock::UpdateAutoHide() {
     if (target != hide_.target) {
         hide_.target = target;
         StartAnimation();
+    }
+}
+
+namespace {
+struct FlyEnum {
+    std::vector<HWND>* list;
+    DWORD selfPid;
+};
+BOOL CALLBACK CollectVisible(HWND h, LPARAM lp) {
+    auto* fe = reinterpret_cast<FlyEnum*>(lp);
+    if (!IsWindowVisible(h)) return TRUE;
+    DWORD pid = 0;
+    GetWindowThreadProcessId(h, &pid);
+    if (pid == fe->selfPid) return TRUE;
+    fe->list->push_back(h);
+    return TRUE;
+}
+std::vector<HWND> VisibleTopWindows() {
+    std::vector<HWND> v;
+    FlyEnum fe{&v, GetCurrentProcessId()};
+    EnumWindows(CollectVisible, reinterpret_cast<LPARAM>(&fe));
+    return v;
+}
+}  // namespace
+
+void Dock::BeginFlyout(float dockX) {
+    flyBefore_ = VisibleTopWindows();
+    std::sort(flyBefore_.begin(), flyBefore_.end());
+    flyAt_ = Now();
+    float cxPx = (monitor_.left + monitor_.right) / 2.f;
+    flyX_ = static_cast<int>(std::lround(cxPx + dockX * scale_));
+    SetTimer(overlay_, kTimerFly, 10, nullptr);
+}
+
+void Dock::MoveFlyouts() {
+    double e = Now() - flyAt_;
+    if (flyAt_ < 0 || e > 2.5) {
+        KillTimer(overlay_, kTimerFly);
+        flyAt_ = -1;
+        return;
+    }
+    // Panelin alt kenarı dock'un üst kenarının biraz üstünde; yatayda tıklanan yerin ortasında.
+    int bottom = monitor_.bottom - static_cast<int>(std::lround((kBottom + kBodyH + 10.f) * scale_));
+    for (HWND h : VisibleTopWindows()) {
+        if (std::binary_search(flyBefore_.begin(), flyBefore_.end(), h) || h == tray_) continue;
+        wchar_t cls[96] = {};
+        GetClassNameW(h, cls, ARRAYSIZE(cls));
+        if (!wcscmp(cls, L"tooltips_class32") || !wcscmp(cls, L"Shell_TrayWnd") || !wcscmp(cls, L"IME")) continue;
+        RECT r;
+        if (!GetWindowRect(h, &r)) continue;
+        int w = r.right - r.left, ht = r.bottom - r.top;
+        if (w <= 0 || ht <= 0 || w > (monitor_.right - monitor_.left) * 9 / 10) continue;
+        // Yalnız ekranın altına yapışık açılan Windows panelleri (ör. sağ alt köşe) taşınır.
+        if (r.bottom < monitor_.bottom - static_cast<int>(160 * scale_)) continue;
+        int left = std::clamp(flyX_ - w / 2, static_cast<int>(monitor_.left) + 8, static_cast<int>(monitor_.right) - 8 - w);
+        int top = std::max(static_cast<int>(monitor_.top) + 8, bottom - ht);
+        if (std::abs(r.left - left) > 1 || std::abs(r.top - top) > 1)
+            SetWindowPos(h, nullptr, left, top, 0, 0, SWP_NOSIZE | SWP_NOZORDER | SWP_NOACTIVATE | SWP_NOOWNERZORDER);
     }
 }
 
