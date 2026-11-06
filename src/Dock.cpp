@@ -286,48 +286,70 @@ bool WifiConnected() {
 void DockLog(const char* fmt, ...);
 
 // Windows taskbar'ındaki "Gizli simgeleri göster" okunu UI Automation ile tıklar (tuş göndermeden).
-// Ayrı iş parçacığında çalışır; ok bulunamazsa hiçbir şey yapmaz.
+// Taskbar gizliyken XAML ağacı boş gelir; pencere görünür olduktan sonra ağaç birkaç yüz ms içinde dolar.
+// Bu yüzden ok bulunana kadar ~2.5 sn boyunca tekrar dener. Ayrı iş parçacığında çalışır.
 void InvokeTrayChevron(HWND tray) {
     std::thread([tray] {
         if (FAILED(CoInitializeEx(nullptr, COINIT_MULTITHREADED))) return;
         {
             ComPtr<IUIAutomation> uia;
-            ComPtr<IUIAutomationElement> root;
             ComPtr<IUIAutomationCondition> cond;
-            ComPtr<IUIAutomationElementArray> arr;
-            VARIANT v;
-            VariantInit(&v);
-            v.vt = VT_I4;
-            v.lVal = UIA_ButtonControlTypeId;
             if (SUCCEEDED(CoCreateInstance(__uuidof(CUIAutomation), nullptr, CLSCTX_INPROC_SERVER, IID_PPV_ARGS(&uia))) &&
-                SUCCEEDED(uia->ElementFromHandle(tray, &root)) && root &&
-                SUCCEEDED(uia->CreatePropertyCondition(UIA_ControlTypePropertyId, v, &cond)) &&
-                SUCCEEDED(root->FindAll(TreeScope_Descendants, cond.Get(), &arr)) && arr) {
-                int n = 0;
-                arr->get_Length(&n);
-                for (int k = 0; k < n; ++k) {
-                    ComPtr<IUIAutomationElement> el;
-                    if (FAILED(arr->GetElement(k, &el)) || !el) continue;
-                    BSTR id = nullptr, name = nullptr;
-                    el->get_CurrentAutomationId(&id);
-                    el->get_CurrentName(&name);
-                    std::wstring sid = id ? id : L"", sname = name ? name : L"";
-                    if (id) SysFreeString(id);
-                    if (name) SysFreeString(name);
-                    for (auto& ch : sid) ch = static_cast<wchar_t>(std::towlower(ch));
-                    for (auto& ch : sname) ch = static_cast<wchar_t>(std::towlower(ch));
-                    bool chevron = sid.find(L"chevron") != std::wstring::npos ||
-                                   sname.find(L"gizli simge") != std::wstring::npos ||
-                                   sname.find(L"hidden icons") != std::wstring::npos;
-                    if (!chevron) continue;
-                    ComPtr<IUIAutomationInvokePattern> inv;
-                    HRESULT hr = E_FAIL;
-                    if (SUCCEEDED(el->GetCurrentPatternAs(UIA_InvokePatternId, IID_PPV_ARGS(&inv))) && inv) hr = inv->Invoke();
-                    DockLog("chevron found k=%d/%d invoke=0x%08lx", k, n, static_cast<unsigned long>(hr));
-                    n = -1;
-                    break;
+                SUCCEEDED(uia->CreateTrueCondition(&cond))) {
+                bool done = false;
+                int lastN = -1;
+                std::string sample;
+                for (int tryNo = 0; tryNo < 25 && !done; ++tryNo) {
+                    if (tryNo) Sleep(100);
+                    ComPtr<IUIAutomationElement> root;
+                    ComPtr<IUIAutomationElementArray> arr;
+                    if (FAILED(uia->ElementFromHandle(tray, &root)) || !root ||
+                        FAILED(root->FindAll(TreeScope_Descendants, cond.Get(), &arr)) || !arr)
+                        continue;
+                    int n = 0;
+                    arr->get_Length(&n);
+                    lastN = n;
+                    sample.clear();
+                    for (int k = 0; k < n; ++k) {
+                        ComPtr<IUIAutomationElement> el;
+                        if (FAILED(arr->GetElement(k, &el)) || !el) continue;
+                        BSTR id = nullptr, name = nullptr, cls = nullptr;
+                        el->get_CurrentAutomationId(&id);
+                        el->get_CurrentName(&name);
+                        el->get_CurrentClassName(&cls);
+                        std::wstring sid = id ? id : L"", sname = name ? name : L"", scls = cls ? cls : L"";
+                        if (id) SysFreeString(id);
+                        if (name) SysFreeString(name);
+                        if (cls) SysFreeString(cls);
+                        for (auto& ch : sid) ch = static_cast<wchar_t>(std::towlower(ch));
+                        for (auto& ch : sname) ch = static_cast<wchar_t>(std::towlower(ch));
+                        for (auto& ch : scls) ch = static_cast<wchar_t>(std::towlower(ch));
+                        if (sample.size() < 300 && (scls.find(L"systemtray") != std::wstring::npos || !sid.empty())) {
+                            for (wchar_t ch : sid) sample += ch < 128 ? static_cast<char>(ch) : '?';
+                            sample += '/';
+                            for (wchar_t ch : scls) sample += ch < 128 ? static_cast<char>(ch) : '?';
+                            sample += ' ';
+                        }
+                        bool chevron = sid.find(L"chevron") != std::wstring::npos ||
+                                       sid == L"systemtrayicon" ||
+                                       sname.find(L"gizli simge") != std::wstring::npos ||
+                                       sname.find(L"hidden icons") != std::wstring::npos;
+                        if (!chevron) continue;
+                        ComPtr<IUIAutomationInvokePattern> inv;
+                        ComPtr<IUIAutomationTogglePattern> tog;
+                        HRESULT hr = E_FAIL;
+                        if (SUCCEEDED(el->GetCurrentPatternAs(UIA_InvokePatternId, IID_PPV_ARGS(&inv))) && inv)
+                            hr = inv->Invoke();
+                        else if (SUCCEEDED(el->GetCurrentPatternAs(UIA_TogglePatternId, IID_PPV_ARGS(&tog))) && tog)
+                            hr = tog->Toggle();
+                        DockLog("chevron found try=%d k=%d/%d invoke=0x%08lx", tryNo, k, n, static_cast<unsigned long>(hr));
+                        done = true;
+                        break;
+                    }
                 }
-                if (n >= 0) DockLog("chevron NOT found among %d buttons", n);
+                if (!done)
+                    DockLog("chevron NOT found: elements=%d visible=%d sample=%s", lastN, IsWindowVisible(tray) ? 1 : 0,
+                            sample.c_str());
             }
         }
         CoUninitialize();
@@ -1902,7 +1924,7 @@ LRESULT Dock::OnOverlay(UINT msg, WPARAM wp, LPARAM lp) {
             if (!flyout) flyout = FindWindowW(L"NotifyIconOverflowWindow", nullptr);
             bool open = flyout && IsWindowVisible(flyout);
             double e = Now() - trayPeekAt_;
-            if ((e > 1.5 && !open) || e > 30.0) {
+            if ((e > 3.0 && !open) || e > 30.0) {
                 KillTimer(overlay_, kTimerTrayPeek);
                 trayPeekAt_ = -1;
                 if (tray_ && IsWindowVisible(tray_)) ShowWindow(tray_, SW_HIDE);
