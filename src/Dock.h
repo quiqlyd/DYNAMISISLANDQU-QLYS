@@ -249,6 +249,12 @@ private:
     bool wifi_ = true;
     double wifiCheckedAt_ = -100;
     int lastMinute_ = -1;
+    // Windows panelleri (gizli simgeler, hızlı ayarlar, bildirimler, Win+X) açılınca tıklanan yerin üstüne taşınır.
+    void BeginFlyout(float dockX);
+    void MoveFlyouts();
+    std::vector<HWND> flyBefore_;
+    double flyAt_ = -1;
+    int flyX_ = 0;
     double lastFrameAt_ = 0;  // son karenin zamanı: kareler takılırsa bekçi zamanlayıcısı çizer
     int stallLogs_ = 0;
     LARGE_INTEGER qpcFreq_{}, lastTick_{};
