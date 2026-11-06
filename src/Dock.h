@@ -57,6 +57,8 @@ private:
         Spring press;   // basınca gömülme (DIP)
         Spring dot;     // açık göstergesi (0-100)
         Spring appear;  // yeni gelen ikon 0'dan büyür (0-100)
+        Spring slide;   // sürükleyerek sıralarken yer değiştiren komşunun kayması (DIP)
+        bool attention = false;  // "bana bak" diyen uygulama: rozet
         double launchAt = -1;  // açılış zıplaması başladığı an
         float lift = 0;        // zıplama yüksekliği
         float x = 0, w = 0, size = 0;  // son yerleşim (DIP, dock içi)
@@ -77,7 +79,7 @@ private:
     void SetFullscreen(bool on);
 
     void LoadPins();
-    void SavePins();
+    void SavePins(bool fromApps = true);
     void Rescan();
     bool Eligible(HWND hwnd) const;
     void Describe(HWND hwnd, std::wstring& aumid, std::wstring& exe) const;
@@ -89,6 +91,16 @@ private:
     void OnClick(int i);
     void Activate(App& a);
     void OpenStart();
+    // 2. parti: sağ tık menüsü, sabitleme, sürükle sırala, dosya bırakma, dikkat rozeti
+    friend class DockDrop;
+    void ShowAppMenu(int i);
+    void SetPinned(int i, bool pinned);
+    void DragTo(float x, float y);
+    void EndDrag(bool commit);
+    void OnShellHook(WPARAM code, HWND hwnd);
+    int DropOver(POINT screen);
+    void DropFiles(int i, const std::vector<std::wstring>& paths);
+    void Puff(float x, float y);
 
     void StartAnimation();
     void FrameLoop();
@@ -97,7 +109,7 @@ private:
     bool CreateGpu();
     void DiscardDevice();
     void Render();
-    void DrawIcon(App& a, float cx, float bottom, float size);
+    void DrawIcon(App& a, float cx, float bottom, float size, float opacity = 1.f);
     void DrawStart(float cx, float bottom, float size);
     void DrawLabel(const App& a, float cx, float top);
     ID2D1Bitmap* Icon(App& a);
@@ -132,6 +144,13 @@ private:
     std::vector<App> apps_;
     std::vector<std::wstring> pinOrder_;  // launch yolları
     int hover_ = -1, pressed_ = -1;
+    POINT downPt_{};
+    bool dragging_ = false;
+    float dragX_ = 0, dragY_ = 0;
+    double puffAt_ = -1;
+    float puffX_ = 0, puffY_ = 0;
+    UINT shellHookMsg_ = 0;
+    class DockDrop* drop_ = nullptr;
     bool mouseIn_ = false;
     float mouseX_ = 0;   // dock içi DIP
     float anchorX_ = 0;  // büyütmenin sabit tuttuğu nokta
