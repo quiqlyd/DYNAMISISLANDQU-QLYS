@@ -372,7 +372,7 @@ bool Dock::Enable(HINSTANCE instance, ID2D1Factory* d2d, IDWriteFactory* dwrite)
     mk(L"Segoe Fluent Icons", DWRITE_FONT_WEIGHT_NORMAL, 15.f, iconFormat_);
     if (titleFormat_) titleFormat_->SetTextAlignment(DWRITE_TEXT_ALIGNMENT_CENTER);
     if (iconFormat_) iconFormat_->SetTextAlignment(DWRITE_TEXT_ALIGNMENT_CENTER);
-    autoHide_ = ReadSetting(L"DockAutoHide", 1) != 0;
+    autoHide_ = ReadSetting(L"DockAutoHide2", 1) != 0  /* yeni anahtar: eski "kapalı" kaydı varsayılanı ezmesin */;
     panelA_.stiffness = 420.f;
     panelA_.damping = 36.f;
     hide_.stiffness = 260.f;
@@ -2042,7 +2042,7 @@ void Dock::SetOnline(bool online) {
 
 void Dock::SetAutoHide(bool on) {
     autoHide_ = on;
-    WriteSetting(L"DockAutoHide", on ? 1 : 0);
+    WriteSetting(L"DockAutoHide2", on ? 1 : 0);
     if (!overlay_) return;
     RegisterAppBar();
     if (on) {
@@ -2068,7 +2068,9 @@ void Dock::UpdateAutoHide() {
     nearRc.bottom = monitor_.bottom;
     bool overDock = shown && PtInRect(&nearRc, pt);
     double t = Now();
-    if (atBottom || overDock || panel_ != Panel::None || dragging_ || pressed_ >= 0) keepShownAt_ = t;
+    // Basılı/sürükleme durumu yalnız tuş gerçekten basılıyken sayılır: takılı kalırsa dock hiç inmezdi.
+    bool holding = (dragging_ || pressed_ >= 0) && (GetAsyncKeyState(VK_LBUTTON) & 0x8000);
+    if (atBottom || overDock || panel_ != Panel::None || holding) keepShownAt_ = t;
     // Fare ayrıldıktan biraz sonra (0.7 sn) aşağı kayar; alta değince yukarı çıkar.
     float target = (t - keepShownAt_ < 0.7) ? 0.f : (kBodyH + kBottom + 32.f);  // gölge de tamamen insin
     if (target != hide_.target) {
