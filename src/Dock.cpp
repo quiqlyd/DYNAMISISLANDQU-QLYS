@@ -6,6 +6,9 @@
 #include <dxgi1_2.h>
 #include <shellapi.h>
 #include <shlwapi.h>
+#include <ole2.h>
+#include <oleauto.h>
+#include <UIAutomationClient.h>
 #include <winsock2.h>
 #include <iphlpapi.h>
 #include <shlobj.h>
@@ -278,6 +281,57 @@ bool WifiConnected() {
         else if (p->IfType == IF_TYPE_ETHERNET_CSMACD) wired = true;
     }
     return wifi && !wired;
+}
+
+void DockLog(const char* fmt, ...);
+
+// Windows taskbar'ındaki "Gizli simgeleri göster" okunu UI Automation ile tıklar (tuş göndermeden).
+// Ayrı iş parçacığında çalışır; ok bulunamazsa hiçbir şey yapmaz.
+void InvokeTrayChevron(HWND tray) {
+    std::thread([tray] {
+        if (FAILED(CoInitializeEx(nullptr, COINIT_MULTITHREADED))) return;
+        {
+            ComPtr<IUIAutomation> uia;
+            ComPtr<IUIAutomationElement> root;
+            ComPtr<IUIAutomationCondition> cond;
+            ComPtr<IUIAutomationElementArray> arr;
+            VARIANT v;
+            VariantInit(&v);
+            v.vt = VT_I4;
+            v.lVal = UIA_ButtonControlTypeId;
+            if (SUCCEEDED(CoCreateInstance(__uuidof(CUIAutomation), nullptr, CLSCTX_INPROC_SERVER, IID_PPV_ARGS(&uia))) &&
+                SUCCEEDED(uia->ElementFromHandle(tray, &root)) && root &&
+                SUCCEEDED(uia->CreatePropertyCondition(UIA_ControlTypePropertyId, v, &cond)) &&
+                SUCCEEDED(root->FindAll(TreeScope_Descendants, cond.Get(), &arr)) && arr) {
+                int n = 0;
+                arr->get_Length(&n);
+                for (int k = 0; k < n; ++k) {
+                    ComPtr<IUIAutomationElement> el;
+                    if (FAILED(arr->GetElement(k, &el)) || !el) continue;
+                    BSTR id = nullptr, name = nullptr;
+                    el->get_CurrentAutomationId(&id);
+                    el->get_CurrentName(&name);
+                    std::wstring sid = id ? id : L"", sname = name ? name : L"";
+                    if (id) SysFreeString(id);
+                    if (name) SysFreeString(name);
+                    for (auto& ch : sid) ch = static_cast<wchar_t>(std::towlower(ch));
+                    for (auto& ch : sname) ch = static_cast<wchar_t>(std::towlower(ch));
+                    bool chevron = sid.find(L"chevron") != std::wstring::npos ||
+                                   sname.find(L"gizli simge") != std::wstring::npos ||
+                                   sname.find(L"hidden icons") != std::wstring::npos;
+                    if (!chevron) continue;
+                    ComPtr<IUIAutomationInvokePattern> inv;
+                    HRESULT hr = E_FAIL;
+                    if (SUCCEEDED(el->GetCurrentPatternAs(UIA_InvokePatternId, IID_PPV_ARGS(&inv))) && inv) hr = inv->Invoke();
+                    DockLog("chevron found k=%d/%d invoke=0x%08lx", k, n, static_cast<unsigned long>(hr));
+                    n = -1;
+                    break;
+                }
+                if (n >= 0) DockLog("chevron NOT found among %d buttons", n);
+            }
+        }
+        CoUninitialize();
+    }).detach();
 }
 
 // Windows taskbar'ını görünmez yapar ya da geri getirir (başka sürecin penceresi; katmanlı saydamlık).
@@ -1853,13 +1907,6 @@ LRESULT Dock::OnOverlay(UINT msg, WPARAM wp, LPARAM lp) {
                 trayPeekAt_ = -1;
                 if (tray_ && IsWindowVisible(tray_)) ShowWindow(tray_, SW_HIDE);
                 SetTrayInvisible(tray_, false);
-            } else if (e > 0.25 && e < 0.4) {
-                // Win+B odağı "gizli simgeleri göster" okuna koydu: açmak için Enter
-                INPUT in[2] = {};
-                in[0].type = in[1].type = INPUT_KEYBOARD;
-                in[0].ki.wVk = in[1].ki.wVk = VK_RETURN;
-                in[1].ki.dwFlags = KEYEVENTF_KEYUP;
-                SendInput(2, in, sizeof(INPUT));
             }
         } else if (wp == kTimerFly) {
             MoveFlyouts();
@@ -2389,7 +2436,7 @@ void Dock::OpenHiddenIcons() {
     trayPeekAt_ = Now();
     SetTrayInvisible(tray_, true);  // taskbar'ın kendisi hiç görünmesin; yalnız paneli açılır
     ShowWindow(tray_, SW_SHOWNA);
-    SendWinKey('B');
+    InvokeTrayChevron(tray_);  // tuş göndermez: odaktaki simgeye yanlışlıkla basılmaz
     SetTimer(overlay_, kTimerTrayPeek, 120, nullptr);
 }
 
