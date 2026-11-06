@@ -336,6 +336,8 @@ bool Island::Create(HINSTANCE instance) {
     {
         bool dockOn = ReadSetting(L"Dock", 0) != 0;
         Dock::RepairOnStartup(dockOn);  // önceki oturum taskbar'ı gizli bıraktıysa düzelt
+        // Windows taskbar'ı (ve tepsi ikonu) gizliyken menüye dock'taki Guti'ye sağ tıklayarak ulaşılır.
+        dock_.onMenu = [this] { ShowTrayMenu(); };
         if (dockOn && dock_.Enable(instance_, d2d_.Get(), dwrite_.Get())) ApplyEyeColor();
     }
 
@@ -2840,6 +2842,16 @@ void Island::UpdatePerf() {
     lastWallTime_ = wall;
 }
 
+void Island::ToggleDock() {
+    if (dock_.Enabled()) {
+        dock_.Disable();
+        WriteSetting(L"Dock", 0);
+    } else if (dock_.Enable(instance_, d2d_.Get(), dwrite_.Get())) {
+        WriteSetting(L"Dock", 1);
+        ApplyEyeColor();
+    }
+}
+
 void Island::AddTrayIcon() {
     NOTIFYICONDATAW nid{sizeof(nid)};
     nid.hWnd = hwnd_;
@@ -2963,15 +2975,7 @@ void Island::ShowTrayMenu() {
     DestroyMenu(menu);
     if (cmd == kCmdAutostart) SetAutostart(!IsAutostartEnabled());
     if (cmd == kCmdToggle) ToggleUserHidden();
-    if (cmd == kCmdDock) {
-        if (dock_.Enabled()) {
-            dock_.Disable();
-            WriteSetting(L"Dock", 0);
-        } else if (dock_.Enable(instance_, d2d_.Get(), dwrite_.Get())) {
-            WriteSetting(L"Dock", 1);
-            ApplyEyeColor();
-        }
-    }
+    if (cmd == kCmdDock) ToggleDock();
     if (cmd == kCmdSounds) ToggleSounds();
     if (cmd == kCmdFocus) ToggleFocus();
     if (cmd == kCmdOcr) StartOcr();

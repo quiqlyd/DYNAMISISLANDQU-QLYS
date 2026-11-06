@@ -1326,6 +1326,10 @@ LRESULT Dock::OnOverlay(UINT msg, WPARAM wp, LPARAM lp) {
         StartAnimation();
         return 0;
     }
+    case WM_RBUTTONUP:
+        // Windows taskbar'ı gizli: tepsi ikonu da yok. Guti'nin menüsü buradan açılır.
+        if (onMenu) onMenu();
+        return 0;
     case WM_DISPLAYCHANGE:
     case WM_DPICHANGED:
         UpdateMonitor();

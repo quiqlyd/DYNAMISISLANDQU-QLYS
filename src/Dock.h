@@ -8,6 +8,7 @@
 #include <wincodec.h>
 #include <wrl/client.h>
 #include <atomic>
+#include <functional>
 #include <string>
 #include <thread>
 #include <vector>
@@ -27,6 +28,7 @@ public:
     void Disable();
     bool Enabled() const { return overlay_ != nullptr; }
     void SetAccent(D2D1_COLOR_F c);
+    std::function<void()> onMenu;  // Guti'ye sağ tık: adanın menüsü
 
     // Uygulama kapanırken/çökerken Windows taskbar'ını geri getirir.
     static void RestoreTaskbarNow();

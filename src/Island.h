@@ -99,7 +99,7 @@ private:
 
 public:
     // Araç çentiği (Tools.cpp): araç ızgarası, yazı tanıma, kahve, not, ekrana çizim, hızlı ayarlar
-    enum class Tool { Ocr, Shot, Picker, Coffee, Note, Ink, Quick, Focus, Calc, Sounds, Update, Sleep, Diary, Count };
+    enum class Tool { Ocr, Shot, Picker, Coffee, Note, Ink, Quick, Focus, Calc, Sounds, Update, Sleep, Diary, Dock, Count };
     static constexpr int kToolCount = static_cast<int>(Tool::Count);
     // Favori siteler: araç ızgarasının son sayfası. ToolHit bunlar için kFavHit + sıra döndürür,
     // "+" kutucuğu için kFavHit + kFavMax.
@@ -120,6 +120,7 @@ private:
     void PageWheel(int delta);
     void ToggleFocus();
     void ToggleSounds();
+    void ToggleDock();
     void StartUpdate();
     // Yazı tanıma
     void StartOcr();

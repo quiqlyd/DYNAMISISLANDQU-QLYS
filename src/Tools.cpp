@@ -30,7 +30,7 @@ const ToolInfo kToolInfo[] = {
     {kGlyphCafe, L"Kahve"},      {kGlyphNote, L"Not"},      {kGlyphPen, L"Çiz"},
     {kGlyphSettings, L"Ayarlar"}, {kGlyphTimer, L"Odak"},   {kGlyphCalc, L"Hesap"},
     {kGlyphVolume, L"Sesler"},   {kGlyphSync, L"Güncelle"}, {kGlyphMoon, L"Uyku"},
-    {kGlyphBook, L"Günlük"},
+    {kGlyphBook, L"Günlük"},     {kGlyphDock, L"Dock"},
 };
 static_assert(sizeof(kToolInfo) / sizeof(kToolInfo[0]) == static_cast<size_t>(Island::kToolCount));
 
@@ -103,6 +103,7 @@ bool Island::ToolActive(Tool t) const {
     case Tool::Focus:
         return companion_.Kind() == Companion::TimerKind::Focus || companion_.Kind() == Companion::TimerKind::Break;
     case Tool::Sleep: return sleepEnd_ > 0;
+    case Tool::Dock: return dock_.Enabled();
     default: return false;
     }
 }
@@ -239,6 +240,7 @@ void Island::RunTool(Tool t) {
     case Tool::Update: StartUpdate(); break;
     case Tool::Sleep: CycleSleep(); break;
     case Tool::Diary: OpenDiary(false); break;
+    case Tool::Dock: ToggleDock(); break;
     case Tool::Count: break;
     }
     StartAnimation();
