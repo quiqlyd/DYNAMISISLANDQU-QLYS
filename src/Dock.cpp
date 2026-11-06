@@ -37,12 +37,20 @@ constexpr float kTopRoom = 96.f;   // gövdenin üstünde büyüyen ikon + isim 
 constexpr float kSideRoom = 110.f; // yanlarda büyüme ve gölge payı
 constexpr float kIconBottom = kBodyH - (kBodyH - kIcon) / 2.f;
 constexpr float kBounce = 15.f, kBouncePeriod = 0.62f;
+constexpr float kPanelRoom = 330.f; // önizleme / yığın paneli için gövdenin üstünde ek yer
+constexpr float kControlW = 96.f;   // kontrol hapı genişliği
+constexpr float kCardW = 196.f, kThumbH = 116.f, kCardGap = 10.f, kPanelPad = 10.f;
+constexpr float kStackW = 300.f, kStackRow = 30.f;
+constexpr int kStackMax = 8;
 
 constexpr UINT kFrameMsg = WM_APP + 60;
 constexpr UINT kAppBarMsg = WM_APP + 61;
 constexpr UINT kRehideMsg = WM_APP + 62;
 constexpr UINT_PTR kTimerRescan = 1;
 constexpr UINT_PTR kTimerHoverLabel = 2;
+constexpr UINT_PTR kTimerPreview = 3;    // fare ikonda durunca önizleme açılır
+constexpr UINT_PTR kTimerPanelOut = 4;   // panel dışına çıkınca kapanır
+constexpr UINT_PTR kTimerAutoHide = 5;   // otomatik gizlemede fare ekranın altına geldi mi?
 
 constexpr wchar_t kPinnedDir[] = L"\\Microsoft\\Internet Explorer\\Quick Launch\\User Pinned\\TaskBar";
 
@@ -346,6 +354,28 @@ bool Dock::Enable(HINSTANCE instance, ID2D1Factory* d2d, IDWriteFactory* dwrite)
         labelFormat_->SetWordWrapping(DWRITE_WORD_WRAPPING_NO_WRAP);
     }
 
+    auto mk = [&](const wchar_t* family, DWRITE_FONT_WEIGHT wt, float size, ComPtr<IDWriteTextFormat>& out) {
+        dwrite_->CreateTextFormat(family, nullptr, wt, DWRITE_FONT_STYLE_NORMAL, DWRITE_FONT_STRETCH_NORMAL, size,
+                                  L"tr-tr", &out);
+        if (!out) return;
+        out->SetWordWrapping(DWRITE_WORD_WRAPPING_NO_WRAP);
+        out->SetParagraphAlignment(DWRITE_PARAGRAPH_ALIGNMENT_CENTER);
+        ComPtr<IDWriteInlineObject> dots;
+        dwrite_->CreateEllipsisTrimmingSign(out.Get(), &dots);
+        DWRITE_TRIMMING trim{DWRITE_TRIMMING_GRANULARITY_CHARACTER, 0, 0};
+        out->SetTrimming(&trim, dots.Get());
+    };
+    mk(L"Segoe UI Variable Text", DWRITE_FONT_WEIGHT_NORMAL, 12.f, titleFormat_);
+    mk(L"Segoe UI Variable Text", DWRITE_FONT_WEIGHT_SEMI_BOLD, 13.f, headFormat_);
+    mk(L"Segoe Fluent Icons", DWRITE_FONT_WEIGHT_NORMAL, 15.f, iconFormat_);
+    if (titleFormat_) titleFormat_->SetTextAlignment(DWRITE_TEXT_ALIGNMENT_CENTER);
+    if (iconFormat_) iconFormat_->SetTextAlignment(DWRITE_TEXT_ALIGNMENT_CENTER);
+    autoHide_ = ReadSetting(L"DockAutoHide", 0) != 0;
+    panelA_.stiffness = 420.f;
+    panelA_.damping = 36.f;
+    hide_.stiffness = 260.f;
+    hide_.damping = 30.f;
+
     static bool registered = false;
     if (!registered) {
         WNDCLASSEXW wc{sizeof(wc)};
@@ -358,6 +388,10 @@ bool Dock::Enable(HINSTANCE instance, ID2D1Factory* d2d, IDWriteFactory* dwrite)
         wc.lpfnWndProc = OverlayProc;
         wc.hbrBackground = nullptr;
         wc.lpszClassName = L"GutiDock";
+        RegisterClassExW(&wc);
+        wc.lpfnWndProc = PreviewProc;
+        wc.hbrBackground = static_cast<HBRUSH>(GetStockObject(BLACK_BRUSH));
+        wc.lpszClassName = L"GutiDockPreview";
         RegisterClassExW(&wc);
         registered = true;
     }
@@ -409,6 +443,7 @@ bool Dock::Enable(HINSTANCE instance, ID2D1Factory* d2d, IDWriteFactory* dwrite)
     OnFrame();  // ilk kare: pencereler yerine otursun
     ShowWindow(glass_, SW_SHOWNOACTIVATE);
     ShowWindow(overlay_, SW_SHOWNOACTIVATE);
+    if (autoHide_) SetTimer(overlay_, kTimerAutoHide, 100, nullptr);
     HideTaskbar();  // önce Windows taskbar'ı çekilsin ki dock'un yeri en alttan ayrılsın
     RegisterAppBar();
     StartAnimation();
@@ -429,6 +464,10 @@ void Dock::Disable() {
     RestoreTaskbar();
     SetUnhandledExceptionFilter(g_prevFilter);
     DeregisterShellHookWindow(overlay_);
+    ClosePanel();
+    if (preview_) DestroyWindow(preview_);
+    preview_ = nullptr;
+    stack_.clear();
     RevokeDragDrop(overlay_);
     if (drop_) drop_->Release();
     drop_ = nullptr;
@@ -465,7 +504,7 @@ void Dock::UpdateMonitor() {
     GetDpiForMonitor(mon, MDT_EFFECTIVE_DPI, &dx, &dy);
     float scale = dx / 96.f;
     int w = mi.rcMonitor.right - mi.rcMonitor.left;
-    int h = static_cast<int>(std::ceil((kTopRoom + kBodyH + kBottom) * scale));
+    int h = static_cast<int>(std::ceil((kPanelRoom + kTopRoom + kBodyH + kBottom) * scale));
     bool changed = scale != scale_ || w != texW_ || h != texH_;
     monitor_ = mi.rcMonitor;
     scale_ = scale;
@@ -499,7 +538,7 @@ void Dock::RegisterAppBar() {
     if (!appBar_) appBar_ = SHAppBarMessage(ABM_NEW, &abd) != FALSE;
     if (!appBar_) return;
     // Dock'un yeri ayrılır: büyütülen pencereler dock'un üstünde biter.
-    int reserve = static_cast<int>(std::ceil((kBodyH + kBottom + 4.f) * scale_));
+    int reserve = autoHide_ ? 0 : static_cast<int>(std::ceil((kBodyH + kBottom + 4.f) * scale_));
     abd.uEdge = ABE_BOTTOM;
     abd.rc = monitor_;
     abd.rc.top = monitor_.bottom - reserve;
@@ -564,6 +603,7 @@ void Dock::LoadPins() {
     for (const auto& path : pinOrder_) {
         App a;
         a.pinned = true;
+        a.appear.Snap(100.f);
         a.launch = path;
         std::wstring exe, aumid;
         if (EndsWith(Lower(path), L".lnk")) {
@@ -584,6 +624,36 @@ void Dock::LoadPins() {
         if (a.name.empty()) a.name = ShellName(path);
         apps_.push_back(std::move(a));
     }
+    // Sağ uç: ayırıcı, İndirilenler, Geri Dönüşüm Kutusu, kontrol hapı
+    App sep2;
+    sep2.isSeparator = true;
+    apps_.push_back(std::move(sep2));
+    {
+        App d;
+        d.isStack = true;
+        PWSTR p = nullptr;
+        if (SUCCEEDED(SHGetKnownFolderPath(FOLDERID_Downloads, 0, nullptr, &p)) && p) {
+            downloads_ = p;
+            CoTaskMemFree(p);
+        }
+        d.launch = downloads_;
+        d.name = L"İndirilenler";
+        apps_.push_back(std::move(d));
+    }
+    {
+        App t;
+        t.isTrash = true;
+        t.launch = L"::{645FF040-5081-101B-9F08-00AA002F954E}";
+        t.name = L"Geri Dönüşüm Kutusu";
+        apps_.push_back(std::move(t));
+    }
+    {
+        App c;
+        c.isControl = true;
+        c.name = L"Wi-Fi · ses · pil";
+        apps_.push_back(std::move(c));
+    }
+    for (auto& a : apps_) a.appear.Snap(100.f);
 }
 
 void Dock::SavePins(bool fromApps) {
@@ -669,10 +739,10 @@ std::wstring Dock::NameFor(const App& a, HWND hwnd) const {
 Dock::App* Dock::FindApp(const std::wstring& aumid, const std::wstring& exe) {
     if (!aumid.empty())
         for (auto& a : apps_)
-            if (!a.isStart && !a.isSeparator && a.aumid == aumid) return &a;
+            if (a.IsApp() && a.aumid == aumid) return &a;
     if (!exe.empty() && !EndsWith(exe, L"\\applicationframehost.exe"))
         for (auto& a : apps_)
-            if (!a.isStart && !a.isSeparator && a.exe == exe) return &a;
+            if (a.IsApp() && a.exe == exe) return &a;
     return nullptr;
 }
 
@@ -709,8 +779,15 @@ void Dock::Rescan() {
             a.launch = (!aumidRaw.empty() && packaged) ? L"shell:AppsFolder\\" + aumidRaw : exeRaw;
             a.name = NameFor(a, h);
             a.appear.Snap(0.f);
-            apps_.push_back(std::move(a));
-            app = &apps_.back();
+            // Yeni uygulama, sağ uçtaki ayırıcıdan önce yer alır.
+            size_t at = apps_.size();
+            for (size_t k = 2; k < apps_.size(); ++k)
+                if (apps_[k].isSeparator) {
+                    at = k;
+                    break;
+                }
+            apps_.insert(apps_.begin() + static_cast<long long>(at), std::move(a));
+            app = &apps_[at];
         }
         app->windows.push_back(h);
         if (h == fg || h == fgRoot) {
@@ -721,7 +798,17 @@ void Dock::Rescan() {
     g_describeCache.swap(keep);
     if (fullscreen_ && !ForegroundFullscreen()) SetFullscreen(false);
     for (auto& a : apps_) {
-        if (a.isStart || a.isSeparator) continue;
+        if (a.isTrash) {
+            // Çöp dolu/boş ikonu değişmiş olabilir
+            SHQUERYRBINFO rb{sizeof(rb)};
+            bool full = SUCCEEDED(SHQueryRecycleBinW(nullptr, &rb)) && rb.i64NumItems > 0;
+            if (full != (a.seen)) {
+                a.seen = full;
+                a.icon.Reset();
+                a.iconTried = false;
+            }
+        }
+        if (!a.IsApp()) continue;
         bool open = !a.windows.empty();
         a.dot.target = open ? 100.f : 0.f;
         a.appear.target = (open || a.pinned) ? 100.f : 0.f;
@@ -737,6 +824,20 @@ void Dock::OnClick(int i) {
         OpenStart();
         return;
     }
+    if (a.isControl) {
+        if (onQuick) onQuick();
+        return;
+    }
+    if (a.isStack) {
+        if (panel_ == Panel::Stack && panelFor_ == i) ClosePanel();
+        else OpenStack(i);
+        return;
+    }
+    if (a.isTrash) {
+        ShellExecuteW(nullptr, L"open", L"shell:RecycleBinFolder", nullptr, nullptr, SW_SHOWNORMAL);
+        return;
+    }
+    ClosePanel();
     if (a.windows.empty()) {
         if (a.launch.empty()) return;
         // Açılıyor: ikon pencere gelene kadar zıplar.
@@ -791,8 +892,9 @@ void Dock::Layout(float* bodyL, float* bodyR) {
     for (size_t i = 0; i < n; ++i) {
         const App& a = apps_[i];
         float appear = std::clamp(a.appear.value / 100.f, 0.f, 1.f);
-        baseW[i] = a.isSeparator ? kSepW : kSlot * appear;
-        w[i] = a.isSeparator ? kSepW : (kSlot + a.grow.value * (kSlot / kIcon)) * appear;
+        float slot = a.isControl ? kControlW : kSlot;
+        baseW[i] = a.isSeparator ? kSepW : slot * appear;
+        w[i] = a.isSeparator ? kSepW : (slot + a.grow.value * (kSlot / kIcon)) * appear;
         baseTotal += baseW[i];
         total += w[i];
     }
@@ -893,18 +995,19 @@ void Dock::OnFrame() {
     // Büyütme hedefleri: fareye yakın ikon büyür, komşuları kosinüs eğrisiyle daha az.
     float baseL = -baseW_ / 2.f, acc = baseL;
     for (auto& a : apps_) {
-        float bw = a.isSeparator ? kSepW : kSlot * std::clamp(a.appear.value / 100.f, 0.f, 1.f);
+        float bw = a.isSeparator ? kSepW : (a.isControl ? kControlW : kSlot) * std::clamp(a.appear.value / 100.f, 0.f, 1.f);
         float c = acc + bw / 2.f;
         acc += bw;
         float g = 0;
-        if (mouseIn_ && !a.isSeparator && !fullscreen_ && !(dragging_ && dragY_ < -40.f)) {
+        if (mouseIn_ && !a.isSeparator && !a.isControl && !fullscreen_ && !(dragging_ && dragY_ < -40.f)) {
             float d = std::fabs(c - mouseX_);
             if (d < kRange) g = kMaxGrow * (std::cos(3.14159265f * d / kRange) + 1.f) / 2.f;
         }
         a.grow.target = g;
         a.press.target = (!dragging_ && pressed_ >= 0 && &apps_[pressed_] == &a && hover_ == pressed_) ? 5.f : 0.f;
     }
-    labelA_.target = (hover_ >= 0 && pressed_ < 0) ? 100.f : 0.f;
+    labelA_.target = (hover_ >= 0 && pressed_ < 0 && panel_ == Panel::None) ? 100.f : 0.f;
+    panelA_.target = panel_ != Panel::None ? 100.f : 0.f;
 
     bool moving = false;
     for (float left = dt; left > 0; left -= 1.f / 240.f) {
@@ -927,6 +1030,8 @@ void Dock::OnFrame() {
             moving |= a.slide.Step(step);
         }
         moving |= labelA_.Step(step);
+        moving |= panelA_.Step(step);
+        moving |= hide_.Step(step);
     }
     // Açılış zıplaması: pencere gelene kadar (en çok 7 sn) yumuşak yaylar; bir yayı yarıda kesmez.
     for (auto& a : apps_) {
@@ -951,7 +1056,7 @@ void Dock::OnFrame() {
     // Kapanmış (sabitli olmayan) uygulamalar küçülerek kaybolur.
     for (size_t i = apps_.size(); i-- > 0;) {
         App& a = apps_[i];
-        if (!a.pinned && !a.isStart && !a.isSeparator && a.appear.target <= 0.f && a.appear.value <= 0.5f) {
+        if (!a.pinned && a.IsApp() && a.appear.target <= 0.f && a.appear.value <= 0.5f) {
             apps_.erase(apps_.begin() + static_cast<long long>(i));
             if (hover_ >= static_cast<int>(i)) hover_ = -1;
             if (pressed_ >= static_cast<int>(i)) pressed_ = -1;
@@ -967,7 +1072,7 @@ void Dock::OnFrame() {
     RECT g;
     g.left = static_cast<LONG>(std::lround(cxPx + bodyL * scale_));
     g.right = static_cast<LONG>(std::lround(cxPx + bodyR * scale_));
-    g.bottom = monitor_.bottom - static_cast<LONG>(std::lround(kBottom * scale_));
+    g.bottom = monitor_.bottom - static_cast<LONG>(std::lround((kBottom - hide_.value) * scale_));
     g.top = g.bottom - static_cast<LONG>(std::lround(kBodyH * scale_));
     if (!EqualRect(&g, &glassRect_)) {
         bool sizeChanged = (g.right - g.left) != (glassRect_.right - glassRect_.left) ||
@@ -1048,6 +1153,10 @@ void Dock::DiscardDevice() {
     for (auto& a : apps_) {
         a.icon.Reset();
         a.iconTried = false;
+    }
+    for (auto& s : stack_) {
+        s.icon.Reset();
+        s.iconTried = false;
     }
     rt_.Reset();
 }
@@ -1199,7 +1308,7 @@ void Dock::Render() {
     rt_->BeginDraw();
     rt_->SetTransform(D2D1::Matrix3x2F::Identity());
     rt_->Clear(D2D1::ColorF(0, 0, 0, 0));
-    rt_->SetTransform(D2D1::Matrix3x2F::Translation(-originX, kTopRoom));
+    rt_->SetTransform(D2D1::Matrix3x2F::Translation(-originX, kPanelRoom + kTopRoom));
 
     float bw = bodyR - bodyL;
     float r = kRadius;
@@ -1249,6 +1358,10 @@ void Dock::Render() {
         if (a.isSeparator) {
             brush_->SetColor(light_ ? Rgba(0, 0, 0, 0.14f) : Rgba(1, 1, 1, 0.16f));
             rt_->FillRectangle(D2D1::RectF(a.x - 0.5f, 15.f, a.x + 0.5f, kBodyH - 15.f), brush_.Get());
+            continue;
+        }
+        if (a.isControl) {
+            DrawControl(a);
             continue;
         }
         if (a.size < 1.f) continue;
@@ -1313,6 +1426,7 @@ void Dock::Render() {
                 brush_.Get());
         }
     }
+    DrawPanel();
     // İsim balonu
     int li = dragging_ ? -1 : (hover_ >= 0 ? hover_ : labelFor_);
     if (li >= 0 && li < static_cast<int>(apps_.size())) {
@@ -1326,9 +1440,14 @@ void Dock::Render() {
         DiscardDevice();
         return;
     }
-    POINT dst{leftPx, monitor_.bottom - texH_};
-    SIZE size{widthPx, texH_};
-    POINT src{0, 0};
+    // Panel kapalıyken dokunun üst kısmı (panel yeri) pencereye aktarılmaz: daha az piksel, daha az iş.
+    int topPx = (panel_ != Panel::None || panelA_.value > 0.5f) ? 0
+                                                                 : static_cast<int>(std::floor(kPanelRoom * scale_));
+    int hidePx = static_cast<int>(std::lround(hide_.value * scale_));
+    POINT dst{leftPx, monitor_.bottom - texH_ + topPx + hidePx};
+    SIZE size{widthPx, texH_ - topPx};
+    POINT src{0, topPx};
+    presentedTop_ = topPx;
     BLENDFUNCTION blend{AC_SRC_OVER, 0, 255, AC_SRC_ALPHA};
     if (gpu_) {
         HDC dc = nullptr;
@@ -1417,7 +1536,7 @@ LRESULT Dock::OnOverlay(UINT msg, WPARAM wp, LPARAM lp) {
     auto toDock = [&](LPARAM l, float* x, float* y) {
         float cxPx = (monitor_.left + monitor_.right) / 2.f;
         *x = (overlayLeft_ + GET_X_LPARAM(l) - cxPx) / scale_;
-        *y = GET_Y_LPARAM(l) / scale_ - kTopRoom;
+        *y = (GET_Y_LPARAM(l) + presentedTop_) / scale_ - (kPanelRoom + kTopRoom);
     };
     if (msg == shellHookMsg_ && shellHookMsg_) {
         OnShellHook(wp, reinterpret_cast<HWND>(lp));
@@ -1435,6 +1554,14 @@ LRESULT Dock::OnOverlay(UINT msg, WPARAM wp, LPARAM lp) {
         if (wp == kTimerRescan) {
             KillTimer(overlay_, kTimerRescan);
             Rescan();
+        } else if (wp == kTimerPreview) {
+            KillTimer(overlay_, kTimerPreview);
+            if (hover_ >= 0 && pressed_ < 0 && !dragging_ && apps_[hover_].IsApp() && !apps_[hover_].windows.empty())
+                OpenPreview(hover_);
+        } else if (wp == kTimerPanelOut) {
+            CheckPanelHover();
+        } else if (wp == kTimerAutoHide) {
+            UpdateAutoHide();
         }
         return 0;
     case WM_MOUSEACTIVATE:
@@ -1447,7 +1574,8 @@ LRESULT Dock::OnOverlay(UINT msg, WPARAM wp, LPARAM lp) {
             TrackMouseEvent(&tme);
             mouseIn_ = true;
         }
-        if (pressed_ >= 2 && !dragging_ && (wp & MK_LBUTTON)) {
+        if (pressed_ >= 2 && pressed_ < static_cast<int>(apps_.size()) && apps_[pressed_].IsApp() && !dragging_ &&
+            (wp & MK_LBUTTON)) {
             POINT pt{GET_X_LPARAM(lp), GET_Y_LPARAM(lp)};
             if (std::abs(pt.x - downPt_.x) + std::abs(pt.y - downPt_.y) > static_cast<int>(7 * scale_)) dragging_ = true;
         }
@@ -1456,10 +1584,18 @@ LRESULT Dock::OnOverlay(UINT msg, WPARAM wp, LPARAM lp) {
             StartAnimation();
             return 0;
         }
+        if (panel_ != Panel::None) CheckPanelHover();
         // Büyütme yalnız gövdenin üstündeyken başlar; büyümüş ikonların üstünde de sürer.
         mouseX_ = x;
         anchorX_ = x;
+        int was = hover_;
         hover_ = HitTest(x, y);
+        if (hover_ != was) {
+            bool hasWins = hover_ >= 0 && apps_[hover_].IsApp() && !apps_[hover_].windows.empty();
+            if (panel_ == Panel::Preview && hasWins) OpenPreview(hover_);  // önizleme açıkken anında geçer
+            else if (hasWins && panel_ == Panel::None) SetTimer(overlay_, kTimerPreview, 550, nullptr);
+            else KillTimer(overlay_, kTimerPreview);
+        }
         StartAnimation();
         return 0;
     }
@@ -1488,6 +1624,11 @@ LRESULT Dock::OnOverlay(UINT msg, WPARAM wp, LPARAM lp) {
             StartAnimation();
             return 0;
         }
+        if (panel_ != Panel::None && pressed_ < 0) {
+            int ph = PanelHit(x, y);
+            if (ph != -1) PanelClick(ph, false);
+            return 0;
+        }
         int hit = HitTest(x, y);
         int p = pressed_;
         pressed_ = -1;
@@ -1503,7 +1644,7 @@ LRESULT Dock::OnOverlay(UINT msg, WPARAM wp, LPARAM lp) {
         float x, y;
         toDock(lp, &x, &y);
         int hit = HitTest(x, y);
-        if (hit >= 2) {
+        if (hit >= 2 && !apps_[hit].isControl) {
             ShowAppMenu(hit);
         } else if (onMenu) {
             // Windows taskbar'ı gizli: tepsi ikonu da yok. Guti'nin menüsü buradan açılır.
@@ -1554,6 +1695,30 @@ void Dock::Puff(float x, float y) {
 
 void Dock::ShowAppMenu(int i) {
     App& a = apps_[i];
+    ClosePanel();
+    if (a.isStack || a.isTrash) {
+        HMENU m = CreatePopupMenu();
+        AppendMenuW(m, MF_STRING, 1, a.isStack ? L"Klasörü aç" : L"Aç");
+        if (a.isTrash) {
+            SHQUERYRBINFO rb{sizeof(rb)};
+            bool full = SUCCEEDED(SHQueryRecycleBinW(nullptr, &rb)) && rb.i64NumItems > 0;
+            AppendMenuW(m, MF_STRING | (full ? 0 : MF_GRAYED), 2, L"Çöpü boşalt…");
+        }
+        POINT pt;
+        GetCursorPos(&pt);
+        SetForegroundWindow(overlay_);
+        UINT cmd = TrackPopupMenu(m, TPM_RETURNCMD | TPM_RIGHTBUTTON | TPM_NONOTIFY | TPM_BOTTOMALIGN | TPM_CENTERALIGN,
+                                  pt.x, pt.y - static_cast<int>(8 * scale_), 0, overlay_, nullptr);
+        DestroyMenu(m);
+        if (cmd == 1)
+            ShellExecuteW(nullptr, L"open", a.isStack ? downloads_.c_str() : L"shell:RecycleBinFolder", nullptr,
+                          nullptr, SW_SHOWNORMAL);
+        if (cmd == 2) {
+            SHEmptyRecycleBinW(nullptr, nullptr, 0);  // Windows kendi onayını sorar
+            SetTimer(overlay_, kTimerRescan, 300, nullptr);
+        }
+        return;
+    }
     enum { kNew = 1, kPin, kUnpin, kClose, kCloseAll };
     HMENU m = CreatePopupMenu();
     AppendMenuW(m, MF_STRING | MF_GRAYED, 0, a.name.empty() ? L"Uygulama" : a.name.c_str());
@@ -1606,11 +1771,12 @@ void Dock::DragTo(float x, float y) {
     for (;;) {
         int i = pressed_;
         App& me = apps_[i];
-        if (i + 1 < static_cast<int>(apps_.size()) && dragX_ > apps_[i + 1].x - apps_[i + 1].slide.value) {
+        if (i + 1 < static_cast<int>(apps_.size()) && apps_[i + 1].IsApp() &&
+            dragX_ > apps_[i + 1].x - apps_[i + 1].slide.value) {
             apps_[i + 1].slide.value += me.w;
             std::swap(apps_[i], apps_[i + 1]);
             pressed_ = i + 1;
-        } else if (i - 1 >= 2 && dragX_ < apps_[i - 1].x - apps_[i - 1].slide.value) {
+        } else if (i - 1 >= 2 && apps_[i - 1].IsApp() && dragX_ < apps_[i - 1].x - apps_[i - 1].slide.value) {
             apps_[i - 1].slide.value -= me.w;
             std::swap(apps_[i], apps_[i - 1]);
             pressed_ = i - 1;
@@ -1680,20 +1846,39 @@ int Dock::DropOver(POINT screen) {
         StartAnimation();
         return -1;
     }
-    float cxPx = (monitor_.left + monitor_.right) / 2.f;
-    float x = (screen.x - cxPx) / scale_;
-    float y = (screen.y - (monitor_.bottom - texH_)) / scale_ - kTopRoom;
+    float x, y;
+    ScreenToDock(screen, &x, &y);
     mouseIn_ = true;
     mouseX_ = anchorX_ = x;
     int hit = HitTest(x, y);
     hover_ = hit;
     StartAnimation();
-    return (hit >= 2 && !apps_[hit].launch.empty()) ? hit : -1;
+    if (hit < 2) return -1;
+    const App& a = apps_[hit];
+    return ((a.IsApp() && !a.launch.empty()) || a.isTrash) ? hit : -1;
 }
 
 void Dock::DropFiles(int i, const std::vector<std::wstring>& paths) {
     if (i < 2 || i >= static_cast<int>(apps_.size()) || paths.empty()) return;
     App& a = apps_[i];
+    if (a.isTrash) {
+        // Çöpe bırakılan dosyalar Geri Dönüşüm Kutusu'na gider (geri alınabilir).
+        std::wstring list;
+        for (const auto& p : paths) {
+            list += p;
+            list.push_back(L'\0');
+        }
+        list.push_back(L'\0');
+        SHFILEOPSTRUCTW op{};
+        op.wFunc = FO_DELETE;
+        op.pFrom = list.c_str();
+        op.fFlags = FOF_ALLOWUNDO;
+        SHFileOperationW(&op);
+        a.icon.Reset();
+        a.iconTried = false;
+        Puff(a.x, kIconBottom - a.size / 2.f);
+        return;
+    }
     std::wstring params;
     for (const auto& p : paths) {
         if (!params.empty()) params += L' ';
@@ -1706,3 +1891,494 @@ void Dock::DropFiles(int i, const std::vector<std::wstring>& paths) {
     StartAnimation();
 }
 
+
+// ---------------------------------------------------------------------------
+// 3. parti: önizlemeler, yığınlar, kontrol hapı, otomatik gizleme
+// ---------------------------------------------------------------------------
+
+bool Dock::ScreenToDock(POINT pt, float* x, float* y) const {
+    float cxPx = (monitor_.left + monitor_.right) / 2.f;
+    int hidePx = static_cast<int>(std::lround(hide_.value * scale_));
+    *x = (pt.x - cxPx) / scale_;
+    *y = (pt.y - (monitor_.bottom - texH_ + hidePx)) / scale_ - (kPanelRoom + kTopRoom);
+    return true;
+}
+
+void Dock::SetVolume(int percent, bool muted) {
+    volume_ = percent;
+    muted_ = muted;
+    StartAnimation();
+}
+
+void Dock::SetOnline(bool online) {
+    online_ = online;
+    StartAnimation();
+}
+
+void Dock::SetAutoHide(bool on) {
+    autoHide_ = on;
+    WriteSetting(L"DockAutoHide", on ? 1 : 0);
+    if (!overlay_) return;
+    RegisterAppBar();
+    if (on) {
+        keepShownAt_ = Now();
+        SetTimer(overlay_, kTimerAutoHide, 100, nullptr);
+    } else {
+        KillTimer(overlay_, kTimerAutoHide);
+        hide_.target = 0.f;
+    }
+    StartAnimation();
+}
+
+void Dock::UpdateAutoHide() {
+    if (!autoHide_) return;
+    POINT pt;
+    GetCursorPos(&pt);
+    bool inMonitor = pt.x >= monitor_.left && pt.x < monitor_.right;
+    bool atBottom = inMonitor && pt.y >= monitor_.bottom - 2;
+    bool shown = hide_.target <= 0.f;
+    RECT nearRc = glassRect_;
+    InflateRect(&nearRc, static_cast<int>(30 * scale_), 0);
+    nearRc.top -= static_cast<LONG>((kMaxGrow + 30.f) * scale_);
+    nearRc.bottom = monitor_.bottom;
+    bool overDock = shown && PtInRect(&nearRc, pt);
+    double t = Now();
+    if (atBottom || overDock || panel_ != Panel::None || dragging_ || pressed_ >= 0) keepShownAt_ = t;
+    // Fare ayrıldıktan biraz sonra (0.7 sn) aşağı kayar; alta değince yukarı çıkar.
+    float target = (t - keepShownAt_ < 0.7) ? 0.f : (kBodyH + kBottom + 14.f);
+    if (target != hide_.target) {
+        hide_.target = target;
+        StartAnimation();
+    }
+}
+
+void Dock::DrawControl(const App& a) {
+    // Tek hapta Wi-Fi, ses ve pil. Tıklayınca adanın hızlı ayarlar kartı açılır.
+    float w = a.w - 12.f, h = 36.f;
+    if (w < 10.f) return;
+    float cy = kBodyH / 2.f;
+    D2D1_ROUNDED_RECT pill{D2D1::RectF(a.x - w / 2, cy - h / 2, a.x + w / 2, cy + h / 2), h / 2, h / 2};
+    bool hot = hover_ >= 0 && &apps_[hover_] == &a;
+    float base = light_ ? 0.05f : 0.07f;
+    brush_->SetColor(light_ ? Rgba(0, 0, 0, base + (hot ? 0.05f : 0.f)) : Rgba(1, 1, 1, base + (hot ? 0.06f : 0.f)));
+    rt_->FillRoundedRectangle(pill, brush_.Get());
+    D2D1_COLOR_F ink = light_ ? Rgba(0.08f, 0.08f, 0.10f, 0.92f) : Rgba(1, 1, 1, 0.92f);
+    SYSTEM_POWER_STATUS ps{};
+    bool battery = GetSystemPowerStatus(&ps) && ps.BatteryFlag != 128 && ps.BatteryLifePercent <= 100;
+    int n = battery ? 3 : 2;
+    float step = w / n;
+    float x0 = a.x - w / 2 + step / 2;
+    if (iconFormat_) {
+        const wchar_t* wifi = L"\xE701";
+        brush_->SetColor(WithAlpha(ink, online_ ? 1.f : 0.35f));
+        rt_->DrawText(wifi, 1, iconFormat_.Get(), D2D1::RectF(x0 - 12, cy - 12, x0 + 12, cy + 12), brush_.Get());
+        const wchar_t* vol = muted_ || volume_ == 0 ? L"\xE74F"
+                             : volume_ < 0       ? L"\xE767"
+                             : volume_ < 34      ? L"\xE993"
+                             : volume_ < 67      ? L"\xE994"
+                                                 : L"\xE995";
+        brush_->SetColor(ink);
+        float x1 = x0 + step;
+        rt_->DrawText(vol, 1, iconFormat_.Get(), D2D1::RectF(x1 - 12, cy - 12, x1 + 12, cy + 12), brush_.Get());
+    }
+    if (battery) {
+        // Kendi çizdiğimiz pil: dolu kısmı yüzdeye göre; şarjdayken yeşil, azken kırmızı.
+        float bx = x0 + 2 * step, bw = 20.f, bh = 10.f;
+        D2D1_ROUNDED_RECT body{D2D1::RectF(bx - bw / 2, cy - bh / 2, bx + bw / 2 - 2, cy + bh / 2), 2.5f, 2.5f};
+        brush_->SetColor(WithAlpha(ink, 0.75f));
+        rt_->DrawRoundedRectangle(body, brush_.Get(), 1.1f);
+        rt_->FillRectangle(D2D1::RectF(bx + bw / 2 - 1.5f, cy - 2, bx + bw / 2, cy + 2), brush_.Get());
+        float pct = ps.BatteryLifePercent / 100.f;
+        bool charging = ps.ACLineStatus == 1;
+        D2D1_COLOR_F fill = charging ? kGreen : (pct < 0.2f ? kRed : ink);
+        brush_->SetColor(fill);
+        float fw = std::max(1.5f, (bw - 6.f) * pct);
+        rt_->FillRoundedRectangle(
+            D2D1_ROUNDED_RECT{D2D1::RectF(bx - bw / 2 + 2, cy - bh / 2 + 2, bx - bw / 2 + 2 + fw, cy + bh / 2 - 2), 1.f, 1.f},
+            brush_.Get());
+    }
+}
+
+// --- Panel ortak --------------------------------------------------------------
+
+void Dock::ClosePanel() {
+    if (panel_ == Panel::None) return;
+    for (auto t : thumbs_) DwmUnregisterThumbnail(t);
+    thumbs_.clear();
+    if (preview_) ShowWindow(preview_, SW_HIDE);
+    panel_ = Panel::None;
+    panelFor_ = -1;
+    panelHover_ = -1;
+    KillTimer(overlay_, kTimerPanelOut);
+    StartAnimation();
+}
+
+void Dock::LayoutPanel() {
+    cards_.clear();
+    if (panelFor_ < 0 || panelFor_ >= static_cast<int>(apps_.size())) return;
+    float ax = apps_[panelFor_].x;
+    if (panel_ == Panel::Preview) {
+        size_t n = previewWins_.size();
+        panelW_ = n * kCardW + (n - 1) * kCardGap + 2 * kPanelPad;
+        panelH_ = kThumbH + 40.f + 2 * kPanelPad;
+    } else {
+        size_t rows = std::max<size_t>(1, stack_.size());
+        panelW_ = kStackW;
+        panelH_ = 38.f + rows * kStackRow + 8.f + 34.f + 8.f;
+    }
+    float halfMon = (monitor_.right - monitor_.left) / scale_ / 2.f - 10.f;
+    panelX_ = std::clamp(ax, -halfMon + panelW_ / 2, halfMon - panelW_ / 2);
+    float L = panelX_ - panelW_ / 2, T = PanelBottom() - panelH_;
+    if (panel_ == Panel::Preview) {
+        for (size_t k = 0; k < previewWins_.size(); ++k) {
+            float l = L + kPanelPad + k * (kCardW + kCardGap);
+            cards_.push_back(D2D1::RectF(l, T + kPanelPad, l + kCardW, T + kPanelPad + kThumbH + 40.f));
+        }
+    } else {
+        float y = T + 38.f;
+        for (size_t k = 0; k < stack_.size(); ++k, y += kStackRow)
+            cards_.push_back(D2D1::RectF(L + 6, y, L + panelW_ - 6, y + kStackRow));
+        if (stack_.empty()) y += kStackRow;
+        cards_.push_back(D2D1::RectF(L + 6, y + 8, L + panelW_ - 6, y + 8 + 34));  // "Klasörde aç"
+    }
+}
+
+int Dock::PanelHit(float x, float y) const {
+    for (size_t k = 0; k < cards_.size(); ++k) {
+        const D2D1_RECT_F& r = cards_[k];
+        if (x < r.left || x > r.right || y < r.top || y > r.bottom) continue;
+        if (panel_ == Panel::Preview) {
+            // Sağ üstteki kapat düğmesi
+            if (x > r.right - 26 && y < r.top + 26) return 1000 + static_cast<int>(k);
+            return static_cast<int>(k);
+        }
+        return k + 1 == cards_.size() ? -2 : static_cast<int>(k);
+    }
+    return -1;
+}
+
+void Dock::PanelClick(int hit, bool middle) {
+    if (panel_ == Panel::Preview) {
+        int k = hit >= 1000 ? hit - 1000 : hit;
+        if (k < 0 || k >= static_cast<int>(previewWins_.size())) return;
+        HWND h = previewWins_[k];
+        if (hit >= 1000 || middle) {
+            PostMessageW(h, WM_CLOSE, 0, 0);
+            ClosePanel();
+            return;
+        }
+        ClosePanel();
+        if (IsIconic(h)) ShowWindowAsync(h, SW_RESTORE);
+        SetForegroundWindow(h);
+        return;
+    }
+    if (panel_ == Panel::Stack) {
+        if (hit == -2) {
+            ShellExecuteW(nullptr, L"open", downloads_.c_str(), nullptr, nullptr, SW_SHOWNORMAL);
+        } else if (hit >= 0 && hit < static_cast<int>(stack_.size())) {
+            ShellExecuteW(nullptr, L"open", stack_[hit].path.c_str(), nullptr, nullptr, SW_SHOWNORMAL);
+        }
+        ClosePanel();
+    }
+}
+
+void Dock::CheckPanelHover() {
+    if (panel_ == Panel::None) {
+        KillTimer(overlay_, kTimerPanelOut);
+        return;
+    }
+    POINT pt;
+    GetCursorPos(&pt);
+    float x, y;
+    ScreenToDock(pt, &x, &y);
+    int h = PanelHit(x, y);
+    if (h != panelHover_) {
+        panelHover_ = h;
+        StartAnimation();
+    }
+    float L = panelX_ - panelW_ / 2 - 10, R = panelX_ + panelW_ / 2 + 10, T = PanelBottom() - panelH_ - 10;
+    bool inPanel = x >= L && x <= R && y >= T && y <= PanelBottom() + 24;
+    RECT body = glassRect_;
+    body.top -= static_cast<LONG>((kMaxGrow + 8.f) * scale_);
+    bool inDock = PtInRect(&body, pt) != FALSE;
+    if (inPanel || inDock) {
+        panelOut_ = 0;
+    } else if (++panelOut_ >= 3) {
+        ClosePanel();
+    }
+}
+
+// --- Pencere önizlemeleri -------------------------------------------------------
+
+LRESULT CALLBACK Dock::PreviewProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
+    if (msg == WM_NCCREATE) {
+        SetWindowLongPtrW(hwnd, GWLP_USERDATA,
+                          reinterpret_cast<LONG_PTR>(reinterpret_cast<CREATESTRUCTW*>(lp)->lpCreateParams));
+        return DefWindowProcW(hwnd, msg, wp, lp);
+    }
+    auto* d = reinterpret_cast<Dock*>(GetWindowLongPtrW(hwnd, GWLP_USERDATA));
+    switch (msg) {
+    case WM_MOUSEACTIVATE:
+        return MA_NOACTIVATE;
+    case WM_MOUSEMOVE:
+        if (d) d->CheckPanelHover();
+        return 0;
+    case WM_LBUTTONUP:
+    case WM_MBUTTONUP:
+        if (d) {
+            POINT pt;
+            GetCursorPos(&pt);
+            float x, y;
+            d->ScreenToDock(pt, &x, &y);
+            int h = d->PanelHit(x, y);
+            if (h != -1) d->PanelClick(h, msg == WM_MBUTTONUP);
+        }
+        return 0;
+    case WM_ERASEBKGND: {
+        RECT rc;
+        GetClientRect(hwnd, &rc);
+        FillRect(reinterpret_cast<HDC>(wp), &rc, static_cast<HBRUSH>(GetStockObject(BLACK_BRUSH)));
+        return 1;
+    }
+    }
+    return DefWindowProcW(hwnd, msg, wp, lp);
+}
+
+void Dock::OpenPreview(int i) {
+    if (i < 0 || i >= static_cast<int>(apps_.size()) || apps_[i].windows.empty()) return;
+    for (auto t : thumbs_) DwmUnregisterThumbnail(t);
+    thumbs_.clear();
+    panel_ = Panel::Preview;
+    panelFor_ = i;
+    panelHover_ = -1;
+    panelOut_ = 0;
+    previewWins_.assign(apps_[i].windows.begin(),
+                        apps_[i].windows.begin() + std::min<size_t>(4, apps_[i].windows.size()));
+    previewTitles_.clear();
+    for (HWND h : previewWins_) {
+        wchar_t t[256] = {};
+        GetWindowTextW(h, t, ARRAYSIZE(t));
+        previewTitles_.push_back(t);
+    }
+    LayoutPanel();
+    if (!preview_) {
+        preview_ = CreateWindowExW(WS_EX_TOOLWINDOW | WS_EX_TOPMOST | WS_EX_NOACTIVATE, L"GutiDockPreview",
+                                   L"Guti Dock Preview", WS_POPUP, 0, 0, 1, 1, glass_, nullptr, instance_, this);
+        if (!preview_) return;
+        DWORD corner = 1;
+        DwmSetWindowAttribute(preview_, 33, &corner, sizeof(corner));
+        COLORREF none = 0xFFFFFFFE;
+        DwmSetWindowAttribute(preview_, 34, &none, sizeof(none));
+    }
+    SetAccentBlur(preview_, light_);
+    // Panelin ekran yeri (px)
+    float cxPx = (monitor_.left + monitor_.right) / 2.f;
+    int hidePx = static_cast<int>(std::lround(hide_.value * scale_));
+    float bodyTopPx = monitor_.bottom - (kBottom + kBodyH) * scale_ + hidePx;
+    int left = static_cast<int>(std::lround(cxPx + (panelX_ - panelW_ / 2) * scale_));
+    int top = static_cast<int>(std::lround(bodyTopPx + (PanelBottom() - panelH_) * scale_));
+    int w = static_cast<int>(std::lround(panelW_ * scale_)), h = static_cast<int>(std::lround(panelH_ * scale_));
+    int d = static_cast<int>(std::lround(32 * scale_));
+    SetWindowRgn(preview_, CreateRoundRectRgn(0, 0, w + 1, h + 1, d, d), FALSE);
+    // Katmanlı dock penceresinin hemen altına: başlıklar ve kapat düğmeleri önizlemenin üstünde çizilir.
+    SetWindowPos(preview_, overlay_, left, top, w, h, SWP_NOACTIVATE | SWP_SHOWWINDOW);
+    for (size_t k = 0; k < previewWins_.size(); ++k) {
+        HTHUMBNAIL th = nullptr;
+        if (FAILED(DwmRegisterThumbnail(preview_, previewWins_[k], &th)) || !th) {
+            thumbs_.push_back(nullptr);
+            continue;
+        }
+        SIZE src{};
+        DwmQueryThumbnailSourceSize(th, &src);
+        const D2D1_RECT_F& c = cards_[k];
+        float areaW = kCardW - 12.f, areaH = kThumbH - 6.f;
+        float sw = src.cx > 0 ? static_cast<float>(src.cx) : areaW, sh = src.cy > 0 ? static_cast<float>(src.cy) : areaH;
+        float k2 = std::min(areaW * scale_ / sw, areaH * scale_ / sh);
+        float tw = sw * k2, tht = sh * k2;
+        float ox = (c.left - (panelX_ - panelW_ / 2) + 6.f) * scale_ + (areaW * scale_ - tw) / 2;
+        float oy = (c.top - (PanelBottom() - panelH_) + 6.f) * scale_ + (areaH * scale_ - tht) / 2;
+        DWM_THUMBNAIL_PROPERTIES p{};
+        p.dwFlags = DWM_TNP_RECTDESTINATION | DWM_TNP_VISIBLE | DWM_TNP_OPACITY | DWM_TNP_SOURCECLIENTAREAONLY;
+        p.rcDestination = RECT{static_cast<LONG>(ox), static_cast<LONG>(oy), static_cast<LONG>(ox + tw),
+                               static_cast<LONG>(oy + tht)};
+        p.fVisible = TRUE;
+        p.opacity = 255;
+        p.fSourceClientAreaOnly = FALSE;
+        DwmUpdateThumbnailProperties(th, &p);
+        thumbs_.push_back(th);
+    }
+    SetTimer(overlay_, kTimerPanelOut, 150, nullptr);
+    StartAnimation();
+}
+
+// --- İndirilenler yığını -----------------------------------------------------------
+
+void Dock::OpenStack(int i) {
+    for (auto t : thumbs_) DwmUnregisterThumbnail(t);
+    thumbs_.clear();
+    if (preview_) ShowWindow(preview_, SW_HIDE);
+    stack_.clear();
+    struct F {
+        std::wstring name;
+        FILETIME t;
+    };
+    std::vector<F> files;
+    WIN32_FIND_DATAW fd;
+    HANDLE f = FindFirstFileW((downloads_ + L"\\*").c_str(), &fd);
+    if (f != INVALID_HANDLE_VALUE) {
+        do {
+            if (!wcscmp(fd.cFileName, L".") || !wcscmp(fd.cFileName, L"..")) continue;
+            if (fd.dwFileAttributes & (FILE_ATTRIBUTE_HIDDEN | FILE_ATTRIBUTE_SYSTEM)) continue;
+            std::wstring n = fd.cFileName, l = Lower(n);
+            if (EndsWith(l, L".crdownload") || EndsWith(l, L".part") || EndsWith(l, L".tmp") || EndsWith(l, L".ini"))
+                continue;
+            files.push_back({n, fd.ftLastWriteTime});
+        } while (FindNextFileW(f, &fd));
+        FindClose(f);
+    }
+    std::sort(files.begin(), files.end(), [](const F& a, const F& b) { return CompareFileTime(&a.t, &b.t) > 0; });
+    for (size_t k = 0; k < files.size() && k < static_cast<size_t>(kStackMax); ++k) {
+        StackItem s;
+        s.path = downloads_ + L"\\" + files[k].name;
+        s.name = files[k].name;
+        stack_.push_back(std::move(s));
+    }
+    panel_ = Panel::Stack;
+    panelFor_ = i;
+    panelHover_ = -1;
+    panelOut_ = 0;
+    LayoutPanel();
+    SetTimer(overlay_, kTimerPanelOut, 150, nullptr);
+    StartAnimation();
+}
+
+ID2D1Bitmap* Dock::FileIcon(StackItem& s) {
+    if (s.icon || s.iconTried || !wic_) return s.icon.Get();
+    s.iconTried = true;
+    ComPtr<IShellItemImageFactory> factory;
+    if (FAILED(SHCreateItemFromParsingName(s.path.c_str(), nullptr, IID_PPV_ARGS(&factory)))) return nullptr;
+    int px = static_cast<int>(std::ceil(22 * scale_));
+    HBITMAP hbmp = nullptr;
+    if (FAILED(factory->GetImage(SIZE{px, px}, SIIGBF_ICONONLY | SIIGBF_BIGGERSIZEOK, &hbmp)) || !hbmp)
+        return nullptr;
+    ComPtr<IWICBitmap> wbmp;
+    ComPtr<IWICFormatConverter> conv;
+    if (SUCCEEDED(wic_->CreateBitmapFromHBITMAP(hbmp, nullptr, WICBitmapUseAlpha, &wbmp)) &&
+        SUCCEEDED(wic_->CreateFormatConverter(&conv)) &&
+        SUCCEEDED(conv->Initialize(wbmp.Get(), GUID_WICPixelFormat32bppPBGRA, WICBitmapDitherTypeNone, nullptr, 0,
+                                   WICBitmapPaletteTypeCustom))) {
+        rt_->CreateBitmapFromWicBitmap(conv.Get(), nullptr, &s.icon);
+    }
+    DeleteObject(hbmp);
+    return s.icon.Get();
+}
+
+void Dock::DrawPanel() {
+    float alpha = std::clamp(panelA_.value / 100.f, 0.f, 1.f);
+    if (panel_ == Panel::None || alpha <= 0.01f) return;
+    float L = panelX_ - panelW_ / 2, T = PanelBottom() - panelH_, R = L + panelW_, B = PanelBottom();
+    D2D1_COLOR_F ink = light_ ? Rgba(0.08f, 0.08f, 0.10f, 0.95f * alpha) : Rgba(1, 1, 1, 0.95f * alpha);
+    D2D1_COLOR_F soft = light_ ? Rgba(0.08f, 0.08f, 0.10f, 0.55f * alpha) : Rgba(1, 1, 1, 0.55f * alpha);
+    if (panel_ == Panel::Preview) {
+        // Cam zemin önizleme penceresinden gelir; burada kenar ışığı, başlıklar ve kapat düğmesi.
+        brush_->SetColor(light_ ? Rgba(1, 1, 1, 0.7f * alpha) : Rgba(1, 1, 1, 0.18f * alpha));
+        rt_->DrawRoundedRectangle(D2D1_ROUNDED_RECT{D2D1::RectF(L + 0.5f, T + 0.5f, R - 0.5f, B - 0.5f), 15.5f, 15.5f},
+                                  brush_.Get(), 1.f);
+        for (size_t k = 0; k < cards_.size() && k < previewTitles_.size(); ++k) {
+            const D2D1_RECT_F& c = cards_[k];
+            bool hot = panelHover_ == static_cast<int>(k) || panelHover_ == 1000 + static_cast<int>(k);
+            if (hot) {
+                brush_->SetColor(light_ ? Rgba(0, 0, 0, 0.07f * alpha) : Rgba(1, 1, 1, 0.10f * alpha));
+                rt_->FillRoundedRectangle(D2D1_ROUNDED_RECT{c, 10.f, 10.f}, brush_.Get());
+            }
+            if (k < previewWins_.size() && IsIconic(previewWins_[k]) && panelFor_ >= 0) {
+                // Küçültülmüş pencerenin görüntüsü olmaz: uygulamanın ikonunu göster.
+                App& a = apps_[panelFor_];
+                DrawIcon(a, (c.left + c.right) / 2, c.top + kThumbH / 2 + 24, 48.f, 0.85f * alpha);
+            }
+            if (titleFormat_) {
+                const std::wstring& t = previewTitles_[k];
+                brush_->SetColor(ink);
+                rt_->DrawText(t.c_str(), static_cast<UINT32>(t.size()), titleFormat_.Get(),
+                              D2D1::RectF(c.left + 8, c.top + kThumbH + 6, c.right - 8, c.bottom - 6), brush_.Get());
+            }
+            if (hot) {
+                float cx = c.right - 13, cy = c.top + 13;
+                brush_->SetColor(Rgba(0.10f, 0.10f, 0.12f, 0.85f * alpha));
+                rt_->FillEllipse(D2D1::Ellipse(D2D1::Point2F(cx, cy), 9, 9), brush_.Get());
+                brush_->SetColor(panelHover_ == 1000 + static_cast<int>(k) ? Rgba(1, 0.45f, 0.42f, alpha)
+                                                                             : Rgba(1, 1, 1, 0.9f * alpha));
+                rt_->DrawLine(D2D1::Point2F(cx - 3.5f, cy - 3.5f), D2D1::Point2F(cx + 3.5f, cy + 3.5f), brush_.Get(), 1.5f);
+                rt_->DrawLine(D2D1::Point2F(cx + 3.5f, cy - 3.5f), D2D1::Point2F(cx - 3.5f, cy + 3.5f), brush_.Get(), 1.5f);
+            }
+        }
+        return;
+    }
+    // İndirilenler: kendi çizdiğimiz kart, aşağıdan hafifçe kayarak gelir.
+    float dy = (1.f - alpha) * 10.f;
+    D2D1::Matrix3x2F old;
+    rt_->GetTransform(&old);
+    rt_->SetTransform(D2D1::Matrix3x2F::Translation(0, dy) * old);
+    D2D1_ROUNDED_RECT card{D2D1::RectF(L, T, R, B), 16.f, 16.f};
+    for (int i = 8; i >= 1; --i) {
+        float d = i * 1.8f;
+        brush_->SetColor(Rgba(0, 0, 0, 0.035f * (1.f - i / 9.f) * alpha));
+        rt_->FillRoundedRectangle(D2D1_ROUNDED_RECT{D2D1::RectF(L - d, T - d + 4, R + d, B + d + 4), 16 + d, 16 + d},
+                                  brush_.Get());
+    }
+    brush_->SetColor(light_ ? Rgba(0.97f, 0.97f, 0.98f, 0.97f * alpha) : Rgba(0.11f, 0.11f, 0.13f, 0.96f * alpha));
+    rt_->FillRoundedRectangle(card, brush_.Get());
+    brush_->SetColor(light_ ? Rgba(0, 0, 0, 0.10f * alpha) : Rgba(1, 1, 1, 0.14f * alpha));
+    rt_->DrawRoundedRectangle(card, brush_.Get(), 1.f);
+    if (headFormat_) {
+        brush_->SetColor(ink);
+        rt_->DrawText(L"İndirilenler", 12, headFormat_.Get(), D2D1::RectF(L + 16, T + 8, R - 16, T + 34), brush_.Get());
+    }
+    for (size_t k = 0; k + 1 < cards_.size() || (stack_.empty() && k == 0); ++k) {
+        if (stack_.empty()) {
+            brush_->SetColor(soft);
+            if (titleFormat_) {
+                D2D1_RECT_F r = D2D1::RectF(L + 16, T + 38, R - 16, T + 38 + kStackRow);
+                rt_->DrawText(L"Klasör boş", 10, headFormat_.Get(), r, brush_.Get());
+            }
+            break;
+        }
+        const D2D1_RECT_F& r = cards_[k];
+        if (panelHover_ == static_cast<int>(k)) {
+            brush_->SetColor(light_ ? Rgba(0, 0, 0, 0.06f * alpha) : Rgba(1, 1, 1, 0.09f * alpha));
+            rt_->FillRoundedRectangle(D2D1_ROUNDED_RECT{r, 8.f, 8.f}, brush_.Get());
+        }
+        StackItem& s = stack_[k];
+        if (ID2D1Bitmap* ic = FileIcon(s)) {
+            float iy = (r.top + r.bottom) / 2;
+            rt_->DrawBitmap(ic, D2D1::RectF(r.left + 8, iy - 11, r.left + 30, iy + 11), alpha,
+                            D2D1_BITMAP_INTERPOLATION_MODE_LINEAR);
+        }
+        if (headFormat_) {
+            ComPtr<IDWriteTextLayout> lay;
+            if (SUCCEEDED(dwrite_->CreateTextLayout(s.name.c_str(), static_cast<UINT32>(s.name.size()),
+                                                    titleFormat_.Get(), r.right - r.left - 46, kStackRow, &lay))) {
+                lay->SetTextAlignment(DWRITE_TEXT_ALIGNMENT_LEADING);
+                brush_->SetColor(ink);
+                rt_->DrawTextLayout(D2D1::Point2F(r.left + 38, r.top), lay.Get(), brush_.Get());
+            }
+        }
+    }
+    if (!cards_.empty()) {
+        const D2D1_RECT_F& r = cards_.back();
+        bool hot = panelHover_ == -2;
+        brush_->SetColor(light_ ? Rgba(0, 0, 0, (hot ? 0.09f : 0.05f) * alpha)
+                                : Rgba(1, 1, 1, (hot ? 0.13f : 0.07f) * alpha));
+        rt_->FillRoundedRectangle(D2D1_ROUNDED_RECT{r, 10.f, 10.f}, brush_.Get());
+        if (headFormat_) {
+            ComPtr<IDWriteTextLayout> lay;
+            if (SUCCEEDED(dwrite_->CreateTextLayout(L"Klasörde aç", 11, headFormat_.Get(), r.right - r.left,
+                                                    r.bottom - r.top, &lay))) {
+                lay->SetTextAlignment(DWRITE_TEXT_ALIGNMENT_CENTER);
+                brush_->SetColor(ink);
+                rt_->DrawTextLayout(D2D1::Point2F(r.left, r.top), lay.Get(), brush_.Get());
+            }
+        }
+    }
+    rt_->SetTransform(old);
+}
