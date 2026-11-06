@@ -80,6 +80,7 @@ constexpr UINT kCmdEyeWhite = 130;   // 130-136 hazır renkler
 constexpr UINT kCmdEyeAccent = 140;  // Windows vurgu rengi
 constexpr UINT kCmdEyePick = 141;    // ekrandan seç
 constexpr UINT kCmdDock = 150;       // Guti Dock (yeni taskbar)
+constexpr UINT kCmdDockAutoHide = 151;
 
 struct EyePreset {
     const wchar_t* name;
@@ -339,6 +340,11 @@ bool Island::Create(HINSTANCE instance) {
         Dock::RepairOnStartup(dockOn);  // önceki oturum taskbar'ı gizli bıraktıysa düzelt
         // Windows taskbar'ı (ve tepsi ikonu) gizliyken menüye dock'taki Guti'ye sağ tıklayarak ulaşılır.
         dock_.onMenu = [this] { ShowTrayMenu(); };
+        dock_.onQuick = [this] {
+            if (userHidden_) ToggleUserHidden();
+            OpenQuick();
+            StartAnimation();
+        };
         if (dockOn && dock_.Enable(instance_, d2d_.Get(), dwrite_.Get())) ApplyEyeColor();
     }
 
@@ -1895,6 +1901,7 @@ void Island::OnHealthTick() {
     case SystemHealth::Net::Offline:
         if (++offlineSamples_ == 2 && !offlineShown_) {
             offlineShown_ = true;
+            dock_.SetOnline(false);
             if (!quiet) ShowAlert(AlertKind::Offline, 0, 3500);
         }
         break;
@@ -1902,6 +1909,7 @@ void Island::OnHealthTick() {
         offlineSamples_ = 0;
         if (offlineShown_) {
             offlineShown_ = false;
+            dock_.SetOnline(true);
             if (!quiet) ShowAlert(AlertKind::Online, 0, 2500);
         }
         break;
@@ -2210,6 +2218,7 @@ void Island::DrawShelf(float w) {
 // ---------------------------------------------------------------------------
 
 void Island::OnVolume(int percent, bool muted) {
+    dock_.SetVolume(percent, muted);
     int before = volume_;
     bool wasMuted = muted_;
     volume_ = percent;
@@ -2854,6 +2863,7 @@ void Island::ToggleDock() {
     } else if (dock_.Enable(instance_, d2d_.Get(), dwrite_.Get())) {
         WriteSetting(L"Dock", 1);
         ApplyEyeColor();
+        dock_.SetVolume(volume_, muted_);
     }
 }
 
@@ -2968,6 +2978,8 @@ void Island::ShowTrayMenu() {
         AppendMenuW(menu, MF_STRING, kCmdCancelTimer, L"Zamanlayıcıyı iptal et");
     AppendMenuW(menu, MF_STRING | (dock_.Enabled() ? MF_CHECKED : 0), kCmdDock,
                 L"Guti Dock (yeni taskbar)\tCtrl+Alt+B");
+    if (dock_.Enabled())
+        AppendMenuW(menu, MF_STRING | (dock_.AutoHide() ? MF_CHECKED : 0), kCmdDockAutoHide, L"Dock'u otomatik gizle");
     AppendMenuW(menu, MF_POPUP, reinterpret_cast<UINT_PTR>(settings), L"Ayarlar");
 
     AppendMenuW(menu, MF_SEPARATOR, 0, nullptr);
@@ -2981,6 +2993,7 @@ void Island::ShowTrayMenu() {
     if (cmd == kCmdAutostart) SetAutostart(!IsAutostartEnabled());
     if (cmd == kCmdToggle) ToggleUserHidden();
     if (cmd == kCmdDock) ToggleDock();
+    if (cmd == kCmdDockAutoHide) dock_.SetAutoHide(!dock_.AutoHide());
     if (cmd == kCmdSounds) ToggleSounds();
     if (cmd == kCmdFocus) ToggleFocus();
     if (cmd == kCmdOcr) StartOcr();

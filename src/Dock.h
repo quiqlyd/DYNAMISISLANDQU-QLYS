@@ -28,7 +28,12 @@ public:
     void Disable();
     bool Enabled() const { return overlay_ != nullptr; }
     void SetAccent(D2D1_COLOR_F c);
-    std::function<void()> onMenu;  // Guti'ye sağ tık: adanın menüsü
+    std::function<void()> onMenu;   // Guti'ye sağ tık: adanın menüsü
+    std::function<void()> onQuick;  // kontrol hapı: adanın hızlı ayarlar kartı
+    void SetVolume(int percent, bool muted);
+    void SetOnline(bool online);
+    void SetAutoHide(bool on);
+    bool AutoHide() const { return autoHide_; }
 
     // Uygulama kapanırken/çökerken Windows taskbar'ını geri getirir.
     static void RestoreTaskbarNow();
@@ -48,6 +53,10 @@ private:
         bool pinned = false;
         bool isStart = false;
         bool isSeparator = false;
+        bool isStack = false;    // İndirilenler yığını
+        bool isTrash = false;    // Geri Dönüşüm Kutusu
+        bool isControl = false;  // Wi-Fi / ses / pil hapı
+        bool IsApp() const { return !isStart && !isSeparator && !isStack && !isTrash && !isControl; }
         std::vector<HWND> windows;  // üstteki önce
         bool active = false;
         bool seen = false;
@@ -101,6 +110,26 @@ private:
     int DropOver(POINT screen);
     void DropFiles(int i, const std::vector<std::wstring>& paths);
     void Puff(float x, float y);
+    // 3. parti: pencere önizlemeleri, İndirilenler/Çöp yığınları, kontrol hapı, otomatik gizleme
+    enum class Panel { None, Preview, Stack };
+    struct StackItem {
+        std::wstring path, name;
+        Microsoft::WRL::ComPtr<ID2D1Bitmap> icon;
+        bool iconTried = false;
+    };
+    static LRESULT CALLBACK PreviewProc(HWND, UINT, WPARAM, LPARAM);
+    void OpenPreview(int i);
+    void OpenStack(int i);
+    void ClosePanel();
+    void LayoutPanel();
+    int PanelHit(float x, float y) const;  // önizleme kartı / yığın satırı; -2: klasörü aç; -1: yok
+    void PanelClick(int hit, bool middle);
+    void CheckPanelHover();
+    void DrawPanel();
+    void DrawControl(const App& a);
+    void UpdateAutoHide();
+    ID2D1Bitmap* FileIcon(StackItem& s);
+    float PanelBottom() const { return -18.f; }
 
     void StartAnimation();
     void FrameLoop();
@@ -157,6 +186,28 @@ private:
     Spring labelA_;      // isim balonu görünürlüğü (0-100)
     int labelFor_ = -1;
     double hoverSince_ = 0;
+    Panel panel_ = Panel::None;
+    int panelFor_ = -1;
+    float panelX_ = 0, panelW_ = 0, panelH_ = 0;  // panel orta x ve boyutları (DIP)
+    Spring panelA_;                              // panel görünürlüğü (0-100)
+    HWND preview_ = nullptr;
+    std::vector<HWND> previewWins_;
+    std::vector<HTHUMBNAIL> thumbs_;
+    std::vector<std::wstring> previewTitles_;
+    Microsoft::WRL::ComPtr<IDWriteTextFormat> titleFormat_, headFormat_, iconFormat_;
+    double keepShownAt_ = 0;
+    bool ScreenToDock(POINT pt, float* x, float* y) const;
+    std::vector<D2D1_RECT_F> cards_;  // panel kartları/satırları (dock koordinatı)
+    int panelHover_ = -1;
+    int panelOut_ = 0;
+    std::vector<StackItem> stack_;
+    std::wstring downloads_;
+    int volume_ = -1;
+    bool muted_ = false, online_ = true;
+    bool autoHide_ = false;
+    Spring hide_;           // otomatik gizlemede aşağı kayma (DIP)
+    bool hideWanted_ = false;
+    int presentedTop_ = 0;  // dokudan pencereye aktarılan ilk satır (px)
     float baseW_ = 0;    // büyütmesiz gövde genişliği
 
     std::vector<HWINEVENTHOOK> hooks_;
