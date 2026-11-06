@@ -14,6 +14,7 @@
 #include <thread>
 #include <vector>
 
+#include "DockGlass.h"
 #include "Spring.h"
 
 // Guti Dock: ekranın alt ortasında yüzen, buzlu cam görünümlü yeni taskbar.
@@ -228,6 +229,9 @@ private:
     bool appBar_ = false;
     UINT taskbarCreatedMsg_ = 0;
     RECT glassRect_{};
+    DockGlass glassFx_;      // yuvarlak köşeli gerçek cam (olmazsa eski accent bulanıklığı)
+    float bodyRadius_ = 22.f;
+    void DrawFolderIcon(App& a, float cx, float bottom, float size, float opacity);
 
     int overlayLeft_ = 0;  // katmanlı pencerenin ekran x'i (px)
     std::thread frameThread_;
