@@ -14,6 +14,7 @@
 
 #include "Command.h"
 #include "Companion.h"
+#include "Dock.h"
 #include "Eyes.h"
 #include "Lyrics.h"
 #include "Weather.h"
@@ -293,6 +294,7 @@ private:
     // Direct2D / DirectWrite
     Microsoft::WRL::ComPtr<ID2D1Factory> d2d_;
     Microsoft::WRL::ComPtr<IDWriteFactory> dwrite_;
+    Dock dock_;  // yeni taskbar (Ayarlar > Guti Dock)
     Microsoft::WRL::ComPtr<ID2D1RenderTarget> rt_;      // çizimin yapıldığı hedef (GPU ya da yazılım)
     Microsoft::WRL::ComPtr<ID2D1DCRenderTarget> dcRt_;  // yazılım yedeği
     Microsoft::WRL::ComPtr<ID3D11Device> d3d_;

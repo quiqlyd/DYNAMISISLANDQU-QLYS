@@ -78,6 +78,7 @@ constexpr UINT kCmdNotify = 127;
 constexpr UINT kCmdEyeWhite = 130;   // 130-136 hazır renkler
 constexpr UINT kCmdEyeAccent = 140;  // Windows vurgu rengi
 constexpr UINT kCmdEyePick = 141;    // ekrandan seç
+constexpr UINT kCmdDock = 150;       // Guti Dock (yeni taskbar)
 
 struct EyePreset {
     const wchar_t* name;
@@ -332,6 +333,11 @@ bool Island::Create(HINSTANCE instance) {
         eyes_.SetMood(Eyes::Mood::Happy, Now(), 1.2);
     }
     AddTrayIcon();
+    {
+        bool dockOn = ReadSetting(L"Dock", 0) != 0;
+        Dock::RepairOnStartup(dockOn);  // önceki oturum taskbar'ı gizli bıraktıysa düzelt
+        if (dockOn && dock_.Enable(instance_, d2d_.Get(), dwrite_.Get())) ApplyEyeColor();
+    }
 
     SetTimer(hwnd_, kTimerTick, 1000, nullptr);
     SetTimer(hwnd_, kTimerLook, 100, nullptr);
@@ -2943,6 +2949,8 @@ void Island::ShowTrayMenu() {
     AppendMenuW(menu, MF_STRING, kCmdFocus, focusing ? L"Odak modunu bitir" : focusLabel);
     if (companion_.Kind() == Companion::TimerKind::Quick)
         AppendMenuW(menu, MF_STRING, kCmdCancelTimer, L"Zamanlayıcıyı iptal et");
+    AppendMenuW(menu, MF_STRING | (dock_.Enabled() ? MF_CHECKED : 0), kCmdDock,
+                L"Guti Dock (yeni taskbar)");
     AppendMenuW(menu, MF_POPUP, reinterpret_cast<UINT_PTR>(settings), L"Ayarlar");
 
     AppendMenuW(menu, MF_SEPARATOR, 0, nullptr);
@@ -2955,6 +2963,15 @@ void Island::ShowTrayMenu() {
     DestroyMenu(menu);
     if (cmd == kCmdAutostart) SetAutostart(!IsAutostartEnabled());
     if (cmd == kCmdToggle) ToggleUserHidden();
+    if (cmd == kCmdDock) {
+        if (dock_.Enabled()) {
+            dock_.Disable();
+            WriteSetting(L"Dock", 0);
+        } else if (dock_.Enable(instance_, d2d_.Get(), dwrite_.Get())) {
+            WriteSetting(L"Dock", 1);
+            ApplyEyeColor();
+        }
+    }
     if (cmd == kCmdSounds) ToggleSounds();
     if (cmd == kCmdFocus) ToggleFocus();
     if (cmd == kCmdOcr) StartOcr();
@@ -3608,7 +3625,11 @@ LRESULT Island::WndProc(UINT msg, WPARAM wp, LPARAM lp) {
         return 0;
     }
 
+    case WM_ENDSESSION:
+        if (wp) dock_.Disable();  // oturum kapanıyor: Windows taskbar'ı ayarını geri koy
+        return 0;
     case WM_DESTROY: {
+        dock_.Disable();
         companion_.Save();
         SaveDiary();
         if (sleepFading_ && sleepRestoreVol_ >= 0) VolumeWatch::Set(sleepRestoreVol_);

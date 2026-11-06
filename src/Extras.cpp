@@ -527,6 +527,7 @@ void Island::ApplyEyeColor() {
             c = Brighten(RGB((argb >> 16) & 0xFF, (argb >> 8) & 0xFF, argb & 0xFF));
     }
     eyes_.SetBaseColor(c);
+    dock_.SetAccent(c);
     StartAnimation();
 }
 
