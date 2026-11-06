@@ -6,6 +6,8 @@
 #include <dxgi1_2.h>
 #include <shellapi.h>
 #include <shlwapi.h>
+#include <winsock2.h>
+#include <iphlpapi.h>
 #include <shlobj.h>
 #include <shobjidl.h>
 #include <propsys.h>
@@ -42,7 +44,7 @@ constexpr float kSideRoom = 110.f; // yanlarda büyüme ve gölge payı
 constexpr float kIconBottom = kBodyH - (kBodyH - kIcon) / 2.f - 1.5f;
 constexpr float kBounce = 6.f, kBouncePeriod = 0.62f;
 constexpr float kPanelRoom = 330.f; // önizleme / yığın paneli için gövdenin üstünde ek yer
-constexpr float kControlW = 80.f;   // kontrol hapı genişliği
+constexpr float kControlW = 150.f;   // kontrol hapı genişliği
 constexpr float kCardW = 196.f, kThumbH = 116.f, kCardGap = 10.f, kPanelPad = 10.f;
 constexpr float kStackW = 300.f, kStackRow = 30.f;
 constexpr int kStackMax = 8;
@@ -56,6 +58,8 @@ constexpr UINT_PTR kTimerPreview = 3;    // fare ikonda durunca önizleme açıl
 constexpr UINT_PTR kTimerPanelOut = 4;   // panel dışına çıkınca kapanır
 constexpr UINT_PTR kTimerAutoHide = 5;   // otomatik gizlemede fare ekranın altına geldi mi?
 constexpr UINT_PTR kTimerBlink = 6;      // mini Guti ara sıra göz kırpar
+constexpr UINT_PTR kTimerTrayPeek = 8;   // gizli simgeler kapanınca taskbar yine gizlenir
+constexpr UINT_PTR kTimerClock = 9;      // saat dakika değişince yeniden çizilir
 constexpr UINT_PTR kTimerWatch = 7;      // kare akışı takılırsa animasyonu yine de yürütür
 
 constexpr wchar_t kPinnedDir[] = L"\\Microsoft\\Internet Explorer\\Quick Launch\\User Pinned\\TaskBar";
@@ -239,6 +243,40 @@ std::vector<JumpTask> JumpTasks(const std::wstring& exeLower) {
     FindClose(find);
     if (out.size() > 10) out.resize(10);
     return out;
+}
+
+// Windows kısayolu gönderir (ör. Win+X, Win+A, Win+N): menüleri/panelleri Windows'un kendisi açar.
+void SendWinKey(WORD vk) {
+    INPUT in[4] = {};
+    for (auto& i : in) i.type = INPUT_KEYBOARD;
+    in[0].ki.wVk = VK_LWIN;
+    in[1].ki.wVk = vk;
+    in[2].ki.wVk = vk;
+    in[2].ki.dwFlags = KEYEVENTF_KEYUP;
+    in[3].ki.wVk = VK_LWIN;
+    in[3].ki.dwFlags = KEYEVENTF_KEYUP;
+    SendInput(4, in, sizeof(INPUT));
+}
+
+bool WifiConnected() {
+    ULONG size = 16 * 1024;
+    std::vector<BYTE> buf(size);
+    auto* aa = reinterpret_cast<IP_ADAPTER_ADDRESSES*>(buf.data());
+    if (GetAdaptersAddresses(AF_UNSPEC, GAA_FLAG_SKIP_ANYCAST | GAA_FLAG_SKIP_MULTICAST | GAA_FLAG_SKIP_DNS_SERVER, nullptr,
+                             aa, &size) == ERROR_BUFFER_OVERFLOW) {
+        buf.resize(size);
+        aa = reinterpret_cast<IP_ADAPTER_ADDRESSES*>(buf.data());
+        if (GetAdaptersAddresses(AF_UNSPEC, GAA_FLAG_SKIP_ANYCAST | GAA_FLAG_SKIP_MULTICAST | GAA_FLAG_SKIP_DNS_SERVER,
+                                 nullptr, aa, &size) != NO_ERROR)
+            return false;
+    }
+    bool wifi = false, wired = false;
+    for (auto* p = aa; p; p = p->Next) {
+        if (p->OperStatus != IfOperStatusUp || !p->FirstGatewayAddress) continue;
+        if (p->IfType == IF_TYPE_IEEE80211) wifi = true;
+        else if (p->IfType == IF_TYPE_ETHERNET_CSMACD) wired = true;
+    }
+    return wifi && !wired;
 }
 
 bool LightTheme() {
@@ -569,6 +607,7 @@ bool Dock::Enable(HINSTANCE instance, ID2D1Factory* d2d, IDWriteFactory* dwrite)
             static_cast<int>(ht), glassFx_.Attached() ? 1 : 0, scale_, monitor_.left, monitor_.top, monitor_.right,
             monitor_.bottom);
     SetTimer(overlay_, kTimerWatch, 50, nullptr);
+    SetTimer(overlay_, kTimerClock, 1000, nullptr);
     focusA_.stiffness = 200.f;
     focusA_.damping = 28.f;
     HideTaskbar();  // önce Windows taskbar'ı çekilsin ki dock'un yeri en alttan ayrılsın
@@ -764,7 +803,7 @@ void Dock::LoadPins() {
     {
         App c;
         c.isControl = true;
-        c.name = L"Wi-Fi · ses · pil";
+        c.name.clear();  // isim balonu çıkmasın
         apps_.push_back(std::move(c));
     }
     for (auto& a : apps_) a.appear.Snap(100.f);
@@ -939,7 +978,10 @@ void Dock::OnClick(int i) {
         return;
     }
     if (a.isControl) {
-        if (onQuick) onQuick();
+        int part = TrayPart(mouseX_);
+        if (part == 0) OpenHiddenIcons();
+        else if (part == 1) SendWinKey('A');   // Hızlı ayarlar: ağ, ses, Bluetooth
+        else if (part == 2) SendWinKey('N');   // Bildirimler ve takvim
         return;
     }
     if (a.isStack) {
@@ -1762,6 +1804,7 @@ LRESULT Dock::OnOverlay(UINT msg, WPARAM wp, LPARAM lp) {
         OnFrame();
         return 0;
     case kRehideMsg:
+        if (trayPeekAt_ >= 0) return 0;  // gizli simgeler açıkken taskbar'a dokunma
         if (tray_ && IsWindowVisible(tray_)) ShowWindow(tray_, SW_HIDE);
         return 0;
     case WM_TIMER:
@@ -1776,6 +1819,31 @@ LRESULT Dock::OnOverlay(UINT msg, WPARAM wp, LPARAM lp) {
             CheckPanelHover();
         } else if (wp == kTimerAutoHide) {
             UpdateAutoHide();
+        } else if (wp == kTimerClock) {
+            SYSTEMTIME st;
+            GetLocalTime(&st);
+            if (st.wMinute != lastMinute_) {
+                lastMinute_ = st.wMinute;
+                StartAnimation();
+            }
+        } else if (wp == kTimerTrayPeek) {
+            // Gizli simgeler paneli kapanınca (ya da en geç 30 sn sonra) Windows taskbar'ı yine gizlenir.
+            HWND flyout = FindWindowW(L"TopLevelWindowForOverflowXamlIsland", nullptr);
+            if (!flyout) flyout = FindWindowW(L"NotifyIconOverflowWindow", nullptr);
+            bool open = flyout && IsWindowVisible(flyout);
+            double e = Now() - trayPeekAt_;
+            if ((e > 1.5 && !open) || e > 30.0) {
+                KillTimer(overlay_, kTimerTrayPeek);
+                trayPeekAt_ = -1;
+                if (tray_ && IsWindowVisible(tray_)) ShowWindow(tray_, SW_HIDE);
+            } else if (e > 0.25 && e < 0.4) {
+                // Win+B odağı "gizli simgeleri göster" okuna koydu: açmak için Enter
+                INPUT in[2] = {};
+                in[0].type = in[1].type = INPUT_KEYBOARD;
+                in[0].ki.wVk = in[1].ki.wVk = VK_RETURN;
+                in[1].ki.dwFlags = KEYEVENTF_KEYUP;
+                SendInput(2, in, sizeof(INPUT));
+            }
         } else if (wp == kTimerWatch) {
             // Ekran kartının dikey senkron beklemesi bazı sistemlerde kare göndermeyi kesebiliyor:
             // animasyon sürerken 80 ms kare gelmezse kareyi buradan çizeriz.
@@ -1875,11 +1943,12 @@ LRESULT Dock::OnOverlay(UINT msg, WPARAM wp, LPARAM lp) {
         float x, y;
         toDock(lp, &x, &y);
         int hit = HitTest(x, y);
-        if (hit >= 2 && !apps_[hit].isControl) {
+        if (hit == 0) {
+            SendWinKey('X');  // Windows logosu: Windows'un kendi sağ tık menüsü
+        } else if (hit >= 2 && !apps_[hit].isControl) {
             ShowAppMenu(hit);
-        } else if (onMenu) {
-            // Windows taskbar'ı gizli: tepsi ikonu da yok. Guti'nin menüsü buradan açılır.
-            onMenu();
+        } else {
+            ShowEmptyMenu();
         }
         return 0;
     }
@@ -2212,50 +2281,97 @@ void Dock::UpdateAutoHide() {
     }
 }
 
+int Dock::TrayPart(float x) const {
+    for (int k = 0; k < 3; ++k)
+        if (x >= trayX_[k] && x < trayX_[k + 1]) return k;
+    return -1;
+}
+
+void Dock::OpenHiddenIcons() {
+    // Gizli simgeler Windows'un kendi panelinde açılır. Panel taskbar'a bağlı olduğu için taskbar kısa süre
+    // görünür bırakılır (otomatik gizli olduğundan ekranın altında durur), panel kapanınca yine gizlenir.
+    if (!tray_) tray_ = FindWindowW(L"Shell_TrayWnd", nullptr);
+    if (!tray_) return;
+    trayPeekAt_ = Now();
+    ShowWindow(tray_, SW_SHOWNA);
+    SendWinKey('B');
+    SetTimer(overlay_, kTimerTrayPeek, 120, nullptr);
+}
+
+void Dock::ShowEmptyMenu() {
+    enum { kTaskMgr = 1, kSettings, kGuti };
+    HMENU m = CreatePopupMenu();
+    AppendMenuW(m, MF_STRING, kTaskMgr, L"Görev Yöneticisi");
+    AppendMenuW(m, MF_STRING, kSettings, L"Görev çubuğu ayarları");
+    AppendMenuW(m, MF_SEPARATOR, 0, nullptr);
+    AppendMenuW(m, MF_STRING, kGuti, L"Guti menüsü");
+    POINT pt;
+    GetCursorPos(&pt);
+    SetForegroundWindow(overlay_);
+    UINT cmd = TrackPopupMenu(m, TPM_RETURNCMD | TPM_RIGHTBUTTON | TPM_NONOTIFY | TPM_BOTTOMALIGN | TPM_CENTERALIGN,
+                              pt.x, pt.y - static_cast<int>(8 * scale_), 0, overlay_, nullptr);
+    DestroyMenu(m);
+    if (cmd == kTaskMgr) ShellExecuteW(nullptr, L"open", L"taskmgr.exe", nullptr, nullptr, SW_SHOWNORMAL);
+    else if (cmd == kSettings) ShellExecuteW(nullptr, L"open", L"ms-settings:taskbar", nullptr, nullptr, SW_SHOWNORMAL);
+    else if (cmd == kGuti && onMenu) onMenu();
+}
+
 void Dock::DrawControl(const App& a) {
-    // Tek hapta Wi-Fi, ses ve pil. Tıklayınca adanın hızlı ayarlar kartı açılır.
-    float w = a.w - 12.f, h = 32.f;
-    if (w < 10.f) return;
+    // Küçük sistem tepsisi: [gizli simgeler] [ağ · ses] [saat / tarih], Windows'taki gibi.
+    float w = a.w - 8.f;
+    if (w < 40.f) return;
+    float L = a.x - w / 2.f;
+    trayX_[0] = L;
+    trayX_[1] = L + 28.f;
+    trayX_[2] = L + 82.f;
+    trayX_[3] = L + w;
     float cy = kBodyH / 2.f;
-    D2D1_ROUNDED_RECT pill{D2D1::RectF(a.x - w / 2, cy - h / 2, a.x + w / 2, cy + h / 2), h / 2, h / 2};
     bool hot = hover_ >= 0 && &apps_[hover_] == &a;
-    float base = light_ ? 0.05f : 0.07f;
-    brush_->SetColor(light_ ? Rgba(0, 0, 0, base + (hot ? 0.05f : 0.f)) : Rgba(1, 1, 1, base + (hot ? 0.06f : 0.f)));
-    rt_->FillRoundedRectangle(pill, brush_.Get());
+    int part = hot ? TrayPart(mouseX_) : -1;
+    if (part >= 0) {
+        brush_->SetColor(light_ ? Rgba(0, 0, 0, 0.055f) : Rgba(1, 1, 1, 0.085f));
+        rt_->FillRoundedRectangle(
+            D2D1_ROUNDED_RECT{D2D1::RectF(trayX_[part] + 1.f, 6.f, trayX_[part + 1] - 1.f, kBodyH - 6.f), 7.f, 7.f},
+            brush_.Get());
+    }
     D2D1_COLOR_F ink = light_ ? Rgba(0.08f, 0.08f, 0.10f, 0.92f) : Rgba(1, 1, 1, 0.92f);
-    SYSTEM_POWER_STATUS ps{};
-    bool battery = GetSystemPowerStatus(&ps) && ps.BatteryFlag != 128 && ps.BatteryLifePercent <= 100;
-    int n = battery ? 3 : 2;
-    float step = w / n;
-    float x0 = a.x - w / 2 + step / 2;
     if (iconFormat_) {
-        const wchar_t* wifi = L"\xE701";
-        brush_->SetColor(WithAlpha(ink, online_ ? 1.f : 0.35f));
-        rt_->DrawText(wifi, 1, iconFormat_.Get(), D2D1::RectF(x0 - 12, cy - 12, x0 + 12, cy + 12), brush_.Get());
+        D2D1::Matrix3x2F old;
+        rt_->GetTransform(&old);
+        auto glyph = [&](const wchar_t* g, float x, float k, float alpha) {
+            rt_->SetTransform(D2D1::Matrix3x2F::Scale(k, k, D2D1::Point2F(x, cy)) * old);
+            brush_->SetColor(WithAlpha(ink, alpha));
+            rt_->DrawText(g, 1, iconFormat_.Get(), D2D1::RectF(x - 12, cy - 12, x + 12, cy + 12), brush_.Get());
+            rt_->SetTransform(old);
+        };
+        glyph(L"\xE70E", (trayX_[0] + trayX_[1]) / 2.f, 0.72f, 0.9f);  // yukarı ok
+        double t = Now();
+        if (t - wifiCheckedAt_ > 15.0) {
+            wifiCheckedAt_ = t;
+            wifi_ = WifiConnected();
+        }
+        float gx = (trayX_[1] + trayX_[2]) / 2.f;
+        glyph(wifi_ ? L"\xE701" : L"\xE839", gx - 11.f, 0.95f, online_ ? 1.f : 0.35f);  // Wi-Fi ya da kablo
         const wchar_t* vol = muted_ || volume_ == 0 ? L"\xE74F"
                              : volume_ < 0       ? L"\xE767"
                              : volume_ < 34      ? L"\xE993"
                              : volume_ < 67      ? L"\xE994"
                                                  : L"\xE995";
-        brush_->SetColor(ink);
-        float x1 = x0 + step;
-        rt_->DrawText(vol, 1, iconFormat_.Get(), D2D1::RectF(x1 - 12, cy - 12, x1 + 12, cy + 12), brush_.Get());
+        glyph(vol, gx + 11.f, 0.95f, 1.f);
     }
-    if (battery) {
-        // Kendi çizdiğimiz pil: dolu kısmı yüzdeye göre; şarjdayken yeşil, azken kırmızı.
-        float bx = x0 + 2 * step, bw = 20.f, bh = 10.f;
-        D2D1_ROUNDED_RECT body{D2D1::RectF(bx - bw / 2, cy - bh / 2, bx + bw / 2 - 2, cy + bh / 2), 2.5f, 2.5f};
-        brush_->SetColor(WithAlpha(ink, 0.75f));
-        rt_->DrawRoundedRectangle(body, brush_.Get(), 1.1f);
-        rt_->FillRectangle(D2D1::RectF(bx + bw / 2 - 1.5f, cy - 2, bx + bw / 2, cy + 2), brush_.Get());
-        float pct = ps.BatteryLifePercent / 100.f;
-        bool charging = ps.ACLineStatus == 1;
-        D2D1_COLOR_F fill = charging ? kGreen : (pct < 0.2f ? kRed : ink);
-        brush_->SetColor(fill);
-        float fw = std::max(1.5f, (bw - 6.f) * pct);
-        rt_->FillRoundedRectangle(
-            D2D1_ROUNDED_RECT{D2D1::RectF(bx - bw / 2 + 2, cy - bh / 2 + 2, bx - bw / 2 + 2 + fw, cy + bh / 2 - 2), 1.f, 1.f},
-            brush_.Get());
+    if (titleFormat_) {
+        SYSTEMTIME st;
+        GetLocalTime(&st);
+        lastMinute_ = st.wMinute;
+        wchar_t tm[16], dt[24];
+        swprintf_s(tm, L"%02d:%02d", st.wHour, st.wMinute);
+        swprintf_s(dt, L"%02d.%02d.%04d", st.wDay, st.wMonth, st.wYear);
+        float cx = (trayX_[2] + trayX_[3]) / 2.f, hw = (trayX_[3] - trayX_[2]) / 2.f;
+        brush_->SetColor(ink);
+        rt_->DrawText(tm, static_cast<UINT32>(wcslen(tm)), titleFormat_.Get(),
+                      D2D1::RectF(cx - hw, cy - 15.f, cx + hw, cy + 1.f), brush_.Get());
+        rt_->DrawText(dt, static_cast<UINT32>(wcslen(dt)), titleFormat_.Get(),
+                      D2D1::RectF(cx - hw, cy - 1.f, cx + hw, cy + 15.f), brush_.Get());
     }
 }
 

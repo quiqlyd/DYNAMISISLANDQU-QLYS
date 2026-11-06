@@ -240,6 +240,15 @@ private:
     HANDLE frameEvent_ = nullptr;
     std::atomic<bool> wantFrames_{false}, framePending_{false}, quit_{false};
     bool animating_ = false;
+    // Küçük sistem tepsisi: gizli simgeler oku, ağ+ses, saat/tarih (x aralıkları, dock içi DIP)
+    float trayX_[4] = {};
+    int TrayPart(float x) const;
+    void OpenHiddenIcons();
+    void ShowEmptyMenu();
+    double trayPeekAt_ = -1;   // gizli simgeler için Windows taskbar'ı kısa süre görünür bırakıldı
+    bool wifi_ = true;
+    double wifiCheckedAt_ = -100;
+    int lastMinute_ = -1;
     double lastFrameAt_ = 0;  // son karenin zamanı: kareler takılırsa bekçi zamanlayıcısı çizer
     int stallLogs_ = 0;
     LARGE_INTEGER qpcFreq_{}, lastTick_{};
