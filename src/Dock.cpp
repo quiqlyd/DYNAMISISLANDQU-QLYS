@@ -310,8 +310,8 @@ bool Dock::Enable(HINSTANCE instance, ID2D1Factory* d2d, IDWriteFactory* dwrite)
     OnFrame();  // ilk kare: pencereler yerine otursun
     ShowWindow(glass_, SW_SHOWNOACTIVATE);
     ShowWindow(overlay_, SW_SHOWNOACTIVATE);
+    HideTaskbar();  // önce Windows taskbar'ı çekilsin ki dock'un yeri en alttan ayrılsın
     RegisterAppBar();
-    HideTaskbar();
     StartAnimation();
     return true;
 }
