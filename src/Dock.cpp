@@ -25,21 +25,21 @@ using namespace isl;
 namespace {
 
 // Ölçüler (DIP)
-constexpr float kIcon = 48.f;      // ikon boyu
-constexpr float kSlot = 60.f;      // ikon + aralık
-constexpr float kSepW = 16.f;      // ayırıcı genişliği
-constexpr float kBodyH = 68.f;     // cam gövde yüksekliği
-constexpr float kBottom = 8.f;     // ekranın altından boşluk
-constexpr float kPadX = 10.f;      // gövde iç yan boşluğu
-constexpr float kRadius = 22.f;    // gövde köşe yarıçapı
-constexpr float kMaxGrow = 24.f;   // büyütme: 48 -> 72 (1.5x)
+constexpr float kIcon = 40.f;      // ikon boyu
+constexpr float kSlot = 50.f;      // ikon + aralık
+constexpr float kSepW = 14.f;      // ayırıcı genişliği
+constexpr float kBodyH = 56.f;     // cam gövde yüksekliği
+constexpr float kBottom = 6.f;     // ekranın altından boşluk
+constexpr float kPadX = 8.f;       // gövde iç yan boşluğu
+constexpr float kRadius = 18.f;    // gövde köşe yarıçapı
+constexpr float kMaxGrow = 20.f;   // büyütme: 40 -> 60 (1.5x)
 constexpr float kRange = 150.f;    // büyütmenin etki yarıçapı
 constexpr float kTopRoom = 96.f;   // gövdenin üstünde büyüyen ikon + isim balonu için yer
 constexpr float kSideRoom = 110.f; // yanlarda büyüme ve gölge payı
 constexpr float kIconBottom = kBodyH - (kBodyH - kIcon) / 2.f;
 constexpr float kBounce = 15.f, kBouncePeriod = 0.62f;
 constexpr float kPanelRoom = 330.f; // önizleme / yığın paneli için gövdenin üstünde ek yer
-constexpr float kControlW = 96.f;   // kontrol hapı genişliği
+constexpr float kControlW = 86.f;   // kontrol hapı genişliği
 constexpr float kCardW = 196.f, kThumbH = 116.f, kCardGap = 10.f, kPanelPad = 10.f;
 constexpr float kStackW = 300.f, kStackRow = 30.f;
 constexpr int kStackMax = 8;
@@ -372,7 +372,7 @@ bool Dock::Enable(HINSTANCE instance, ID2D1Factory* d2d, IDWriteFactory* dwrite)
     mk(L"Segoe Fluent Icons", DWRITE_FONT_WEIGHT_NORMAL, 15.f, iconFormat_);
     if (titleFormat_) titleFormat_->SetTextAlignment(DWRITE_TEXT_ALIGNMENT_CENTER);
     if (iconFormat_) iconFormat_->SetTextAlignment(DWRITE_TEXT_ALIGNMENT_CENTER);
-    autoHide_ = ReadSetting(L"DockAutoHide", 0) != 0;
+    autoHide_ = ReadSetting(L"DockAutoHide", 1) != 0;
     panelA_.stiffness = 420.f;
     panelA_.damping = 36.f;
     hide_.stiffness = 260.f;
@@ -1458,7 +1458,7 @@ void Dock::Render() {
         App& a = apps_[i];
         if (a.isSeparator) {
             brush_->SetColor(light_ ? Rgba(0, 0, 0, 0.12f) : Rgba(1, 1, 1, 0.14f));
-            rt_->FillRectangle(D2D1::RectF(a.x - 0.5f, 17.f, a.x + 0.5f, kBodyH - 17.f), brush_.Get());
+            rt_->FillRectangle(D2D1::RectF(a.x - 0.5f, 14.f, a.x + 0.5f, kBodyH - 14.f), brush_.Get());
             continue;
         }
         if (a.isControl) {
@@ -2070,7 +2070,7 @@ void Dock::UpdateAutoHide() {
     double t = Now();
     if (atBottom || overDock || panel_ != Panel::None || dragging_ || pressed_ >= 0) keepShownAt_ = t;
     // Fare ayrıldıktan biraz sonra (0.7 sn) aşağı kayar; alta değince yukarı çıkar.
-    float target = (t - keepShownAt_ < 0.7) ? 0.f : (kBodyH + kBottom + 14.f);
+    float target = (t - keepShownAt_ < 0.7) ? 0.f : (kBodyH + kBottom + 32.f);  // gölge de tamamen insin
     if (target != hide_.target) {
         hide_.target = target;
         StartAnimation();
@@ -2079,7 +2079,7 @@ void Dock::UpdateAutoHide() {
 
 void Dock::DrawControl(const App& a) {
     // Tek hapta Wi-Fi, ses ve pil. Tıklayınca adanın hızlı ayarlar kartı açılır.
-    float w = a.w - 12.f, h = 36.f;
+    float w = a.w - 12.f, h = 32.f;
     if (w < 10.f) return;
     float cy = kBodyH / 2.f;
     D2D1_ROUNDED_RECT pill{D2D1::RectF(a.x - w / 2, cy - h / 2, a.x + w / 2, cy + h / 2), h / 2, h / 2};
