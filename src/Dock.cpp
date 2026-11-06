@@ -698,7 +698,6 @@ bool Dock::Enable(HINSTANCE instance, ID2D1Factory* d2d, IDWriteFactory* dwrite)
             static_cast<int>(ht), glassFx_.Attached() ? 1 : 0, scale_, monitor_.left, monitor_.top, monitor_.right,
             monitor_.bottom);
     SetTimer(overlay_, kTimerWatch, 50, nullptr);
-    SetTimer(overlay_, kTimerClock, 1000, nullptr);
     focusA_.stiffness = 200.f;
     focusA_.damping = 28.f;
     HideTaskbar();  // önce Windows taskbar'ı çekilsin ki dock'un yeri en alttan ayrılsın
@@ -887,16 +886,12 @@ void Dock::LoadPins() {
         if (a.name.empty()) a.name = ShellName(path);
         apps_.push_back(std::move(a));
     }
-    // Sağ uç: (görünmez) ayırıcı ve kontrol hapı
+    // Sağ uç: görünmez, genişliği olmayan işaret; açık uygulamalar bunun önüne eklenir.
+    // (Saat / tepsi hapı kaldırıldı: Windows panelleri dock'un zarif görünümüne uymadı.)
     App sep2;
     sep2.isSeparator = true;
+    sep2.isEnd = true;
     apps_.push_back(std::move(sep2));
-    {
-        App c;
-        c.isControl = true;
-        c.name.clear();  // isim balonu çıkmasın
-        apps_.push_back(std::move(c));
-    }
     for (auto& a : apps_) a.appear.Snap(100.f);
 }
 
@@ -1143,8 +1138,8 @@ void Dock::Layout(float* bodyL, float* bodyR) {
         const App& a = apps_[i];
         float appear = std::clamp(a.appear.value / 100.f, 0.f, 1.f);
         float slot = a.isControl ? kControlW : kSlot;
-        baseW[i] = a.isSeparator ? kSepW : slot * appear;
-        w[i] = a.isSeparator ? kSepW : (slot + a.grow.value * (kSlot / kIcon)) * appear;
+        baseW[i] = a.isSeparator ? (a.isEnd ? 0.f : kSepW) : slot * appear;
+        w[i] = a.isSeparator ? (a.isEnd ? 0.f : kSepW) : (slot + a.grow.value * (kSlot / kIcon)) * appear;
         baseTotal += baseW[i];
         total += w[i];
     }
@@ -1246,7 +1241,7 @@ void Dock::OnFrame() {
     // Büyütme hedefleri: fareye yakın ikon büyür, komşuları kosinüs eğrisiyle daha az.
     float baseL = -baseW_ / 2.f, acc = baseL;
     for (auto& a : apps_) {
-        float bw = a.isSeparator ? kSepW : (a.isControl ? kControlW : kSlot) * std::clamp(a.appear.value / 100.f, 0.f, 1.f);
+        float bw = a.isSeparator ? (a.isEnd ? 0.f : kSepW) : (a.isControl ? kControlW : kSlot) * std::clamp(a.appear.value / 100.f, 0.f, 1.f);
         float c = acc + bw / 2.f;
         acc += bw;
         float g = 0;
@@ -1683,6 +1678,7 @@ void Dock::Render() {
     // Öğeler
     for (size_t i = 0; i < apps_.size(); ++i) {
         App& a = apps_[i];
+        if (a.isSeparator && a.isEnd) continue;
         if (a.isSeparator) {
             // macOS'taki gibi ince dikey çizgi
             brush_->SetColor(light_ ? Rgba(0, 0, 0, 0.16f) : Rgba(1, 1, 1, 0.20f));

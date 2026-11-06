@@ -62,6 +62,7 @@ private:
         bool isStack = false;    // İndirilenler yığını
         bool isTrash = false;    // Geri Dönüşüm Kutusu
         bool isControl = false;  // Wi-Fi / ses / pil hapı
+        bool isEnd = false;      // sağ uçtaki görünmez işaret (genişliği yok)
         bool IsApp() const { return !isStart && !isSeparator && !isStack && !isTrash && !isControl; }
         std::vector<HWND> windows;  // üstteki önce
         bool active = false;
