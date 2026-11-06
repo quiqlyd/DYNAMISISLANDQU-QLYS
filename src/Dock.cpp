@@ -33,18 +33,18 @@ using namespace isl;
 namespace {
 
 // Ölçüler (DIP)
-constexpr float kIcon = 30.f;      // ikon boyu
-constexpr float kSlot = 44.f;      // ikon + aralık
+constexpr float kIcon = 36.f;      // ikon boyu (gövdenin ~%72'si, macOS dock oranı)
+constexpr float kSlot = 43.f;      // ikon + aralık (ikonlar sık dizilir)
 constexpr float kSepW = 8.f;       // ayırıcı genişliği
-constexpr float kBodyH = 48.f;     // cam gövde yüksekliği
+constexpr float kBodyH = 50.f;     // cam gövde yüksekliği
 constexpr float kBottom = 6.f;     // ekranın altından boşluk
-constexpr float kPadX = 8.f;       // gövde iç yan boşluğu
-constexpr float kRadius = 14.f;    // gövde köşe yarıçapı
+constexpr float kPadX = 6.f;       // gövde iç yan boşluğu
+constexpr float kRadius = 16.f;    // gövde köşe yarıçapı
 constexpr float kMaxGrow = 0.f;    // büyütme yok: sade, Windows tarzı
 constexpr float kRange = 150.f;    // büyütmenin etki yarıçapı
 constexpr float kTopRoom = 96.f;   // gövdenin üstünde büyüyen ikon + isim balonu için yer
 constexpr float kSideRoom = 110.f; // yanlarda büyüme ve gölge payı
-constexpr float kIconBottom = kBodyH - (kBodyH - kIcon) / 2.f - 1.5f;
+constexpr float kIconBottom = 5.f + kIcon;  // üstte 5, altta açık noktası için 9 DIP
 constexpr float kBounce = 6.f, kBouncePeriod = 0.62f;
 constexpr float kPanelRoom = 330.f; // önizleme / yığın paneli için gövdenin üstünde ek yer
 constexpr float kControlW = 150.f;   // kontrol hapı genişliği
@@ -1666,19 +1666,29 @@ void Dock::Render() {
         rt_->DrawRoundedRectangle(rr, brush_.Get(), 1.6f);
     }
     // Gövde: düz, sade cam; yalnız ince bir kenar çizgisi (parlama yok).
+    // macOS dock'u gibi: dumanlı cam, dışta koyu ince çizgi, içte ince açık kenar.
     D2D1_ROUNDED_RECT body{D2D1::RectF(bodyL, 0, bodyR, kBodyH), r, r};
-    brush_->SetColor(light_ ? Rgba(1, 1, 1, 0.05f) : Rgba(1, 1, 1, 0.02f));
+    brush_->SetColor(light_ ? Rgba(1, 1, 1, 0.06f) : Rgba(0, 0, 0, 0.10f));
     rt_->FillRoundedRectangle(body, brush_.Get());
-    brush_->SetColor(light_ ? Rgba(0, 0, 0, 0.09f) : Rgba(1, 1, 1, 0.10f));
+    brush_->SetColor(Rgba(0, 0, 0, light_ ? 0.14f : 0.35f));
     rt_->DrawRoundedRectangle(
         D2D1_ROUNDED_RECT{D2D1::RectF(bodyL + 0.5f, 0.5f, bodyR - 0.5f, kBodyH - 0.5f), r - 0.5f, r - 0.5f},
+        brush_.Get(), 1.f);
+    brush_->SetColor(Rgba(1, 1, 1, light_ ? 0.45f : 0.17f));
+    rt_->DrawRoundedRectangle(
+        D2D1_ROUNDED_RECT{D2D1::RectF(bodyL + 1.5f, 1.5f, bodyR - 1.5f, kBodyH - 1.5f), r - 1.5f, r - 1.5f},
         brush_.Get(), 1.f);
     (void)bw;
 
     // Öğeler
     for (size_t i = 0; i < apps_.size(); ++i) {
         App& a = apps_[i];
-        if (a.isSeparator) continue;  // sade görünüm: ayırıcı yalnız küçük bir boşluk
+        if (a.isSeparator) {
+            // macOS'taki gibi ince dikey çizgi
+            brush_->SetColor(light_ ? Rgba(0, 0, 0, 0.16f) : Rgba(1, 1, 1, 0.20f));
+            rt_->FillRectangle(D2D1::RectF(a.x - 0.5f, 11.f, a.x + 0.5f, kBodyH - 11.f), brush_.Get());
+            continue;
+        }
         if (a.isControl) {
             DrawControl(a);
             continue;
@@ -1686,21 +1696,11 @@ void Dock::Render() {
         if (a.size < 1.f) continue;
         bool dragged = dragging_ && static_cast<int>(i) == pressed_;
         if (dragged) continue;  // sürüklenen ikon en son, her şeyin üstünde çizilir
-        {
-            // Windows 11 tarzı: üzerine gelince ve öndeki uygulamada ikonun arkasında yumuşak bir kare.
-            float hv = std::clamp(a.hov.value / 100.f, 0.f, 1.f);
-            float act = (a.active && a.IsApp()) ? 1.f : 0.f;
-            float al = light_ ? (0.055f * hv + 0.045f * act) : (0.085f * hv + 0.065f * act);
-            if (al > 0.003f) {
-                float hw = (kSlot - 6.f) / 2.f;
-                brush_->SetColor(light_ ? Rgba(0, 0, 0, al) : Rgba(1, 1, 1, al));
-                rt_->FillRoundedRectangle(
-                    D2D1_ROUNDED_RECT{D2D1::RectF(a.x - hw, 4.f, a.x + hw, kBodyH - 4.f), 8.f, 8.f}, brush_.Get());
-            }
-        }
+        // Üzerine gelince arka kare yok: ikon yalnız hafifçe yükselir (büyüme/dalga yok).
+        float hv = std::clamp(a.hov.value / 100.f, 0.f, 1.f);
         float press = a.press.value;
         float size = a.size * (1.f - press / 60.f);
-        float bottom = kIconBottom - a.lift - press * 0.25f;
+        float bottom = kIconBottom - a.lift - press * 0.25f - 2.f * hv;
         // Zıplamada yere değerken hafif ezilme
         if (a.launchAt >= 0 && a.lift < 3.f) {
             float squash = (3.f - a.lift) / 3.f * 0.06f;
@@ -1738,18 +1738,16 @@ void Dock::Render() {
                 float wob = 0.55f + 0.45f * std::sin(tt * (7.f + b * 2.3f) + b * 1.7f);
                 float hgt = 2.5f + 6.f * std::clamp(musicLevel_ * 1.6f, 0.f, 1.f) * wob;
                 float bx = a.x + b * 4.f;
-                float y1 = kBodyH - 2.f;
+                float y1 = kBodyH - 2.5f;
                 rt_->FillRoundedRectangle(
                     D2D1_ROUNDED_RECT{D2D1::RectF(bx - 1.1f, y1 - hgt, bx + 1.1f, y1), 1.1f, 1.1f}, brush_.Get());
             }
         } else if (dot > 0.01f) {
-            float dw = (a.active ? 14.f : 6.f) * dot, dh = 3.f * dot;
-            D2D1_COLOR_F c = a.active ? Rgba(0.30f, 0.62f, 1.f, 1.f) : (light_ ? Rgba(0, 0, 0, 0.40f) : Rgba(1, 1, 1, 0.50f));
-            brush_->SetColor(WithAlpha(c, dot));
-            float y = kBodyH - 3.5f;
-            rt_->FillRoundedRectangle(
-                D2D1_ROUNDED_RECT{D2D1::RectF(a.x - dw / 2, y - dh / 2, a.x + dw / 2, y + dh / 2), dh / 2, dh / 2},
-                brush_.Get());
+            // macOS'taki gibi ikonun altında küçük yuvarlak nokta; öndeki uygulamada daha belirgin.
+            float rad = 2.f * dot;
+            float al = a.active ? 0.95f : 0.55f;
+            brush_->SetColor(light_ ? Rgba(0, 0, 0, al * 0.75f * dot) : Rgba(1, 1, 1, al * dot));
+            rt_->FillEllipse(D2D1::Ellipse(D2D1::Point2F(a.x, kBodyH - 4.5f), rad, rad), brush_.Get());
         }
     }
     // Sürüklenen ikon: fareyi izler; dock'tan yukarı çıkınca solar ("bırakırsan kalkar").
