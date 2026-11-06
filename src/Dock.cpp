@@ -12,6 +12,8 @@
 #include <windowsx.h>
 #include <algorithm>
 #include <cmath>
+#include <cstdarg>
+#include <cstdio>
 #include <cwctype>
 #include <thread>
 #include <unordered_map>
@@ -167,6 +169,34 @@ bool LightTheme() {
                      L"SystemUsesLightTheme", RRF_RT_REG_DWORD, nullptr, &v, &size) != ERROR_SUCCESS)
         return false;
     return v != 0;
+}
+
+// Teşhis: dock.log (exe'nin yanında). Yalnız durum değişince bir satır yazar.
+void DockLog(const char* fmt, ...) {
+    static std::wstring path;
+    if (path.empty()) {
+        wchar_t exe[MAX_PATH];
+        GetModuleFileNameW(nullptr, exe, MAX_PATH);
+        path = exe;
+        path = path.substr(0, path.find_last_of(L"\\/") + 1) + L"dock.log";
+        DeleteFileW(path.c_str());  // her açılışta temiz başla
+    }
+    char buf[512];
+    SYSTEMTIME st;
+    GetLocalTime(&st);
+    int n = snprintf(buf, sizeof(buf), "%02d:%02d:%02d.%03d ", st.wHour, st.wMinute, st.wSecond, st.wMilliseconds);
+    va_list ap;
+    va_start(ap, fmt);
+    n += vsnprintf(buf + n, sizeof(buf) - n - 2, fmt, ap);
+    va_end(ap);
+    if (n > static_cast<int>(sizeof(buf)) - 2) n = sizeof(buf) - 2;
+    buf[n++] = '\n';
+    HANDLE f = CreateFileW(path.c_str(), FILE_APPEND_DATA, FILE_SHARE_READ | FILE_SHARE_WRITE, nullptr, OPEN_ALWAYS,
+                           FILE_ATTRIBUTE_NORMAL, nullptr);
+    if (f == INVALID_HANDLE_VALUE) return;
+    DWORD w;
+    WriteFile(f, buf, n, &w, nullptr);
+    CloseHandle(f);
 }
 
 struct AccentPolicy {
@@ -456,7 +486,10 @@ bool Dock::Enable(HINSTANCE instance, ID2D1Factory* d2d, IDWriteFactory* dwrite)
     OnFrame();  // ilk kare: pencereler yerine otursun
     ShowWindow(glass_, SW_SHOWNOACTIVATE);
     ShowWindow(overlay_, SW_SHOWNOACTIVATE);
-    if (autoHide_) SetTimer(overlay_, kTimerAutoHide, 100, nullptr);
+    UINT_PTR ht = autoHide_ ? SetTimer(overlay_, kTimerAutoHide, 100, nullptr) : 0;
+    DockLog("enable autoHide=%d timer=%d fx=%d scale=%.2f mon=%ld,%ld,%ld,%ld", autoHide_ ? 1 : 0,
+            static_cast<int>(ht), glassFx_.Attached() ? 1 : 0, scale_, monitor_.left, monitor_.top, monitor_.right,
+            monitor_.bottom);
     SetTimer(overlay_, kTimerBlink, 3500, nullptr);
     focusA_.stiffness = 200.f;
     focusA_.damping = 28.f;
@@ -2073,6 +2106,19 @@ void Dock::UpdateAutoHide() {
     if (atBottom || overDock || panel_ != Panel::None || holding) keepShownAt_ = t;
     // Fare ayrıldıktan biraz sonra (0.7 sn) aşağı kayar; alta değince yukarı çıkar.
     float target = (t - keepShownAt_ < 0.7) ? 0.f : (kBodyH + kBottom + 32.f);  // gölge de tamamen insin
+    {
+        static int lastSig = -1;
+        int sig = (atBottom ? 1 : 0) | (overDock ? 2 : 0) | (panel_ != Panel::None ? 4 : 0) | (holding ? 8 : 0) |
+                  (target > 0 ? 16 : 0) | (static_cast<int>(hide_.value) > 1 ? 32 : 0);
+        if (sig != lastSig) {
+            lastSig = sig;
+            DockLog("autohide cur=%ld,%ld glass=%ld,%ld,%ld,%ld bottom=%d near=%d panel=%d hold=%d(p%d d%d) target=%.0f "
+                    "value=%.1f anim=%d",
+                    pt.x, pt.y, glassRect_.left, glassRect_.top, glassRect_.right, glassRect_.bottom, atBottom ? 1 : 0,
+                    overDock ? 1 : 0, static_cast<int>(panel_), holding ? 1 : 0, pressed_, dragging_ ? 1 : 0, target,
+                    hide_.value, animating_ ? 1 : 0);
+        }
+    }
     if (target != hide_.target) {
         hide_.target = target;
         StartAnimation();
