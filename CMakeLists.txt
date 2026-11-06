@@ -27,6 +27,7 @@ add_executable(DynamisIsland WIN32
     src/NotifyUia.cpp
     src/Weather.cpp
     src/Dock.cpp
+    src/DockGlass.cpp
     src/Island.h
     src/MediaService.h
     src/Spring.h
@@ -43,10 +44,11 @@ add_executable(DynamisIsland WIN32
     src/Weather.h
     src/Notify.h
     src/Dock.h
+    src/DockGlass.h
 )
 
 set(APP_VERSION 0 CACHE STRING "Sürüm numarası (CI çalıştırma numarası)")
 target_compile_definitions(DynamisIsland PRIVATE APP_VERSION=${APP_VERSION} UNICODE _UNICODE NOMINMAX WIN32_LEAN_AND_MEAN)
 target_compile_options(DynamisIsland PRIVATE /utf-8 /W4 /permissive- /bigobj)
 target_link_libraries(DynamisIsland PRIVATE
-    d2d1 dwrite windowscodecs winhttp winmm shcore windowsapp shell32 advapi32 user32 gdi32 ole32 uuid setupapi cfgmgr32 d3d11 dxgi dwmapi psapi wbemuuid oleaut32 version)
+    d2d1 dwrite windowscodecs winhttp winmm shcore windowsapp shell32 advapi32 user32 gdi32 ole32 uuid setupapi cfgmgr32 d3d11 dxgi dwmapi psapi wbemuuid oleaut32 version CoreMessaging)

@@ -25,14 +25,14 @@ using namespace isl;
 namespace {
 
 // Ölçüler (DIP)
-constexpr float kIcon = 44.f;      // ikon boyu
-constexpr float kSlot = 54.f;      // ikon + aralık
+constexpr float kIcon = 48.f;      // ikon boyu
+constexpr float kSlot = 60.f;      // ikon + aralık
 constexpr float kSepW = 16.f;      // ayırıcı genişliği
-constexpr float kBodyH = 62.f;     // cam gövde yüksekliği
+constexpr float kBodyH = 68.f;     // cam gövde yüksekliği
 constexpr float kBottom = 8.f;     // ekranın altından boşluk
-constexpr float kPadX = 9.f;       // gövde iç yan boşluğu
-constexpr float kRadius = 21.f;    // gövde köşe yarıçapı
-constexpr float kMaxGrow = 22.f;   // büyütme: 44 -> 66 (1.5x)
+constexpr float kPadX = 10.f;      // gövde iç yan boşluğu
+constexpr float kRadius = 22.f;    // gövde köşe yarıçapı
+constexpr float kMaxGrow = 24.f;   // büyütme: 48 -> 72 (1.5x)
 constexpr float kRange = 150.f;    // büyütmenin etki yarıçapı
 constexpr float kTopRoom = 96.f;   // gövdenin üstünde büyüyen ikon + isim balonu için yer
 constexpr float kSideRoom = 110.f; // yanlarda büyüme ve gölge payı
@@ -397,9 +397,20 @@ bool Dock::Enable(HINSTANCE instance, ID2D1Factory* d2d, IDWriteFactory* dwrite)
         RegisterClassExW(&wc);
         registered = true;
     }
-    glass_ = CreateWindowExW(WS_EX_TOOLWINDOW | WS_EX_TOPMOST | WS_EX_NOACTIVATE, L"GutiDockGlass", L"Guti Dock Glass",
-                             WS_POPUP, 0, 0, 1, 1, nullptr, nullptr, instance, this);
+    // Önce gerçek cam denenir (Windows.UI.Composition, yuvarlak ve pürüzsüz köşeler);
+    // olmazsa eski accent bulanıklığı + Windows'un kendi yuvarlak köşeleri.
+    glass_ = CreateWindowExW(WS_EX_TOOLWINDOW | WS_EX_TOPMOST | WS_EX_NOACTIVATE | WS_EX_NOREDIRECTIONBITMAP,
+                             L"GutiDockGlass", L"Guti Dock Glass", WS_POPUP, 0, 0, 1, 1, nullptr, nullptr, instance,
+                             this);
+    if (glass_ && !glassFx_.Attach(glass_)) {
+        DestroyWindow(glass_);
+        glass_ = nullptr;
+    }
+    if (!glass_)
+        glass_ = CreateWindowExW(WS_EX_TOOLWINDOW | WS_EX_TOPMOST | WS_EX_NOACTIVATE, L"GutiDockGlass",
+                                 L"Guti Dock Glass", WS_POPUP, 0, 0, 1, 1, nullptr, nullptr, instance, this);
     if (!glass_) return false;
+    bodyRadius_ = glassFx_.Attached() ? kRadius : 8.f;  // Windows 11'in yuvarlak köşesi 8 DIP'tir
     // Üst pencerenin sahibi cam pencere: Windows onu her zaman camın üstünde tutar.
     overlay_ = CreateWindowExW(WS_EX_LAYERED | WS_EX_TOOLWINDOW | WS_EX_TOPMOST | WS_EX_NOACTIVATE, L"GutiDock",
                                L"Guti Dock", WS_POPUP, 0, 0, 1, 1, glass_, nullptr, instance, this);
@@ -409,7 +420,7 @@ bool Dock::Enable(HINSTANCE instance, ID2D1Factory* d2d, IDWriteFactory* dwrite)
         return false;
     }
     taskbarCreatedMsg_ = RegisterWindowMessageW(L"TaskbarCreated");
-    DWORD corner = 1;  // DWMWCP_DONOTROUND: köşeleri biz yuvarlatıyoruz
+    DWORD corner = glassFx_.Attached() ? 1 : 2;  // DONOTROUND: köşeleri cam kırpar; yoksa ROUND
     DwmSetWindowAttribute(glass_, 33 /* DWMWA_WINDOW_CORNER_PREFERENCE */, &corner, sizeof(corner));
     COLORREF none = 0xFFFFFFFE;  // DWMWA_COLOR_NONE
     DwmSetWindowAttribute(glass_, 34 /* DWMWA_BORDER_COLOR */, &none, sizeof(none));
@@ -486,6 +497,8 @@ void Dock::Disable() {
     }
     if (dib_) DeleteObject(dib_);
     dib_ = nullptr;
+    glassFx_.Detach();
+    glassRect_ = RECT{};
     HWND o = overlay_, g = glass_;
     overlay_ = glass_ = nullptr;
     DestroyWindow(o);
@@ -533,7 +546,11 @@ void Dock::UpdateMonitor() {
 
 void Dock::ApplyGlass() {
     light_ = LightTheme();
-    SetAccentBlur(glass_, light_);
+    if (glassFx_.Attached())
+        glassFx_.Update(glassRect_.right - glassRect_.left, glassRect_.bottom - glassRect_.top,
+                        bodyRadius_ * scale_, light_);
+    else
+        SetAccentBlur(glass_, light_);
 }
 
 void Dock::RegisterAppBar() {
@@ -1093,11 +1110,8 @@ void Dock::OnFrame() {
         glassRect_ = g;
         SetWindowPos(glass_, nullptr, g.left, g.top, g.right - g.left, g.bottom - g.top,
                      SWP_NOACTIVATE | SWP_NOZORDER | SWP_NOOWNERZORDER);
-        if (sizeChanged) {
-            int d = static_cast<int>(std::lround(2 * kRadius * scale_));
-            HRGN rgn = CreateRoundRectRgn(0, 0, g.right - g.left + 1, g.bottom - g.top + 1, d, d);
-            SetWindowRgn(glass_, rgn, TRUE);  // bölge artık pencereye ait
-        }
+        if (sizeChanged && glassFx_.Attached())
+            glassFx_.Update(g.right - g.left, g.bottom - g.top, bodyRadius_ * scale_, light_);
     }
 
     Render();
@@ -1218,6 +1232,7 @@ ID2D1Bitmap* Dock::Icon(App& a) {
     ComPtr<IShellItemImageFactory> factory;
     if (FAILED(SHCreateItemFromParsingName(parsing.c_str(), nullptr, IID_PPV_ARGS(&factory)))) return nullptr;
     int px = static_cast<int>(std::ceil((kIcon + kMaxGrow) * scale_));
+    px = px <= 96 ? 96 : (px <= 128 ? 128 : 256);  // hazır ikon boylarından büyüğü: büyütmede bulanıklaşmasın
     HBITMAP hbmp = nullptr;
     if (FAILED(factory->GetImage(SIZE{px, px}, SIIGBF_ICONONLY | SIIGBF_BIGGERSIZEOK, &hbmp)) || !hbmp)
         return nullptr;
@@ -1281,7 +1296,9 @@ void Dock::DrawIcon(App& a, float cx, float bottom, float size, float opacity) {
     ID2D1Bitmap* bmp = Icon(a);
     D2D1_RECT_F rc = D2D1::RectF(cx - size / 2, bottom - size, cx + size / 2, bottom);
     if (bmp) {
-        rt_->DrawBitmap(bmp, rc, opacity, D2D1_BITMAP_INTERPOLATION_MODE_LINEAR);
+        // Ekran kartında yüksek kaliteli küçültme: ikonlar keskin ve pürüzsüz.
+        if (gpu_ && ctx_) ctx_->DrawBitmap(bmp, &rc, opacity, D2D1_INTERPOLATION_MODE_HIGH_QUALITY_CUBIC, nullptr);
+        else rt_->DrawBitmap(bmp, rc, opacity, D2D1_BITMAP_INTERPOLATION_MODE_LINEAR);
         return;
     }
     // İkon yoksa: baş harfli yuvarlak kare
@@ -1298,6 +1315,48 @@ void Dock::DrawIcon(App& a, float cx, float bottom, float size, float opacity) {
         rt_->DrawText(c, 1, labelFormat_.Get(), D2D1::RectF(cx - 10, bottom - size / 2 - 10, cx + 10, bottom - size / 2 + 10),
                       brush_.Get());
         rt_->SetTransform(old);
+    }
+}
+
+void Dock::DrawFolderIcon(App& a, float cx, float bottom, float size, float opacity) {
+    // İndirilenler ve Çöp: Guti'nin kendi çizdiği, dock'a uyumlu yuvarlak kare ikonlar.
+    float r = size * 0.24f;
+    D2D1_RECT_F rc = D2D1::RectF(cx - size / 2, bottom - size, cx + size / 2, bottom);
+    D2D1_COLOR_F top = a.isStack ? Rgba(0.38f, 0.74f, 1.f, opacity) : Rgba(0.72f, 0.74f, 0.79f, opacity);
+    D2D1_COLOR_F bot = a.isStack ? Rgba(0.09f, 0.43f, 0.96f, opacity) : Rgba(0.40f, 0.42f, 0.48f, opacity);
+    ComPtr<ID2D1GradientStopCollection> stops;
+    D2D1_GRADIENT_STOP gs[2] = {{0.f, top}, {1.f, bot}};
+    rt_->CreateGradientStopCollection(gs, 2, &stops);
+    ComPtr<ID2D1LinearGradientBrush> fill;
+    if (stops && SUCCEEDED(rt_->CreateLinearGradientBrush(
+                     D2D1::LinearGradientBrushProperties(D2D1::Point2F(cx, rc.top), D2D1::Point2F(cx, rc.bottom)),
+                     stops.Get(), &fill))) {
+        rt_->FillRoundedRectangle(D2D1_ROUNDED_RECT{rc, r, r}, fill.Get());
+    }
+    brush_->SetColor(Rgba(1, 1, 1, 0.28f * opacity));
+    rt_->DrawRoundedRectangle(
+        D2D1_ROUNDED_RECT{D2D1::RectF(rc.left + 0.5f, rc.top + 0.5f, rc.right - 0.5f, rc.bottom - 0.5f), r - 0.5f, r - 0.5f},
+        brush_.Get(), 1.f);
+    if (!iconFormat_) return;
+    const wchar_t* glyph = a.isStack ? L"\uE896" : L"\uE74D";  // İndir / Çöp kutusu
+    D2D1::Matrix3x2F old;
+    rt_->GetTransform(&old);
+    float k = size * 0.50f / 15.f;
+    D2D1_POINT_2F c = D2D1::Point2F(cx, bottom - size / 2);
+    rt_->SetTransform(D2D1::Matrix3x2F::Scale(k, k, c) * old);
+    D2D1_RECT_F g = D2D1::RectF(c.x - 12, c.y - 12, c.x + 12, c.y + 12);
+    brush_->SetColor(Rgba(0, 0, 0, 0.18f * opacity));  // hafif kabartma gölgesi
+    rt_->DrawText(glyph, 1, iconFormat_.Get(), D2D1::RectF(g.left, g.top + 0.8f, g.right, g.bottom + 0.8f), brush_.Get());
+    brush_->SetColor(Rgba(1, 1, 1, opacity));
+    rt_->DrawText(glyph, 1, iconFormat_.Get(), g, brush_.Get());
+    rt_->SetTransform(old);
+    if (a.isTrash && a.seen) {
+        // Dolu çöp: ikonun altında küçük beyaz bir çizgi
+        brush_->SetColor(Rgba(1, 1, 1, 0.85f * opacity));
+        float w = size * 0.18f;
+        rt_->FillRoundedRectangle(
+            D2D1_ROUNDED_RECT{D2D1::RectF(cx - w, bottom - size * 0.15f, cx + w, bottom - size * 0.11f), 1.f, 1.f},
+            brush_.Get());
     }
 }
 
@@ -1346,43 +1405,50 @@ void Dock::Render() {
     rt_->SetTransform(D2D1::Matrix3x2F::Translation(-originX, kPanelRoom + kTopRoom));
 
     float bw = bodyR - bodyL;
-    float r = kRadius;
-    // Yumuşak gölge: yalnız gövdenin dışında (camı karartmasın).
-    for (int i = 10; i >= 1; --i) {
-        float d = i * 1.6f;
-        float a = (light_ ? 0.030f : 0.045f) * (1.f - i / 11.f);
+    float r = bodyRadius_;
+    // Yumuşak, geniş gölge: yalnız gövdenin dışında (camı karartmasın), hafif aşağı kayık.
+    for (int i = 16; i >= 1; --i) {
+        float d = i * 1.5f;
+        float k = 1.f - i / 17.f;
+        float a = (light_ ? 0.034f : 0.060f) * k * k;
         brush_->SetColor(Rgba(0, 0, 0, a));
-        D2D1_ROUNDED_RECT rr{D2D1::RectF(bodyL - d + 0.5f, -d + 3.f, bodyR + d - 0.5f, kBodyH + d + 3.f), r + d, r + d};
-        rt_->DrawRoundedRectangle(rr, brush_.Get(), 1.7f);
+        D2D1_ROUNDED_RECT rr{D2D1::RectF(bodyL - d + 0.75f, -d + 4.f, bodyR + d - 0.75f, kBodyH + d + 4.f), r + d, r + d};
+        rt_->DrawRoundedRectangle(rr, brush_.Get(), 1.6f);
     }
-    // Gövde: camın üstüne çok hafif bir dolgu (tıklamaları yakalasın) ve üstte parlak bir ışık.
+    // Gövde: camın üstüne çok hafif bir dolgu (tıklamaları yakalasın) ve üstte yumuşak bir ışık.
     D2D1_ROUNDED_RECT body{D2D1::RectF(bodyL, 0, bodyR, kBodyH), r, r};
-    brush_->SetColor(light_ ? Rgba(1, 1, 1, 0.10f) : Rgba(1, 1, 1, 0.035f));
+    brush_->SetColor(light_ ? Rgba(1, 1, 1, 0.06f) : Rgba(1, 1, 1, 0.025f));
     rt_->FillRoundedRectangle(body, brush_.Get());
     {
         ComPtr<ID2D1GradientStopCollection> stops;
-        D2D1_GRADIENT_STOP gs[2] = {{0.f, Rgba(1, 1, 1, light_ ? 0.30f : 0.10f)}, {1.f, Rgba(1, 1, 1, 0.f)}};
-        rt_->CreateGradientStopCollection(gs, 2, &stops);
+        D2D1_GRADIENT_STOP gs[3] = {{0.f, Rgba(1, 1, 1, light_ ? 0.26f : 0.085f)},
+                                    {0.5f, Rgba(1, 1, 1, light_ ? 0.06f : 0.015f)},
+                                    {1.f, Rgba(1, 1, 1, 0.f)}};
+        rt_->CreateGradientStopCollection(gs, 3, &stops);
         ComPtr<ID2D1LinearGradientBrush> sheen;
         if (stops &&
             SUCCEEDED(rt_->CreateLinearGradientBrush(
-                D2D1::LinearGradientBrushProperties(D2D1::Point2F(0, 0), D2D1::Point2F(0, kBodyH * 0.55f)),
+                D2D1::LinearGradientBrushProperties(D2D1::Point2F(0, 0), D2D1::Point2F(0, kBodyH)),
                 stops.Get(), &sheen))) {
             rt_->FillRoundedRectangle(body, sheen.Get());
         }
     }
-    // Kenar ışığı: üstte belirgin, altta silik. Bölgenin pürüzlü kenarını da örter.
+    // Dış ince çizgi: cam gövdeyi arka plandan ayırır (açıkta gri, koyuda siyah).
+    brush_->SetColor(light_ ? Rgba(0, 0, 0, 0.10f) : Rgba(0, 0, 0, 0.45f));
+    rt_->DrawRoundedRectangle(D2D1_ROUNDED_RECT{D2D1::RectF(bodyL - 0.5f, -0.5f, bodyR + 0.5f, kBodyH + 0.5f), r + 0.5f, r + 0.5f},
+                              brush_.Get(), 1.f);
+    // İç kenar ışığı: üstte parlak, altta silik.
     {
         ComPtr<ID2D1GradientStopCollection> stops;
-        D2D1_GRADIENT_STOP gs[2] = {{0.f, light_ ? Rgba(1, 1, 1, 0.85f) : Rgba(1, 1, 1, 0.24f)},
-                                    {1.f, light_ ? Rgba(0, 0, 0, 0.10f) : Rgba(1, 1, 1, 0.07f)}};
+        D2D1_GRADIENT_STOP gs[2] = {{0.f, light_ ? Rgba(1, 1, 1, 0.90f) : Rgba(1, 1, 1, 0.26f)},
+                                    {1.f, light_ ? Rgba(1, 1, 1, 0.30f) : Rgba(1, 1, 1, 0.06f)}};
         rt_->CreateGradientStopCollection(gs, 2, &stops);
         ComPtr<ID2D1LinearGradientBrush> rim;
         if (stops && SUCCEEDED(rt_->CreateLinearGradientBrush(
                          D2D1::LinearGradientBrushProperties(D2D1::Point2F(0, 0), D2D1::Point2F(0, kBodyH)),
                          stops.Get(), &rim))) {
             D2D1_ROUNDED_RECT edge{D2D1::RectF(bodyL + 0.5f, 0.5f, bodyR - 0.5f, kBodyH - 0.5f), r - 0.5f, r - 0.5f};
-            rt_->DrawRoundedRectangle(edge, rim.Get(), 1.2f);
+            rt_->DrawRoundedRectangle(edge, rim.Get(), 1.f);
         }
     }
     (void)bw;
@@ -1391,8 +1457,8 @@ void Dock::Render() {
     for (size_t i = 0; i < apps_.size(); ++i) {
         App& a = apps_[i];
         if (a.isSeparator) {
-            brush_->SetColor(light_ ? Rgba(0, 0, 0, 0.14f) : Rgba(1, 1, 1, 0.16f));
-            rt_->FillRectangle(D2D1::RectF(a.x - 0.5f, 15.f, a.x + 0.5f, kBodyH - 15.f), brush_.Get());
+            brush_->SetColor(light_ ? Rgba(0, 0, 0, 0.12f) : Rgba(1, 1, 1, 0.14f));
+            rt_->FillRectangle(D2D1::RectF(a.x - 0.5f, 17.f, a.x + 0.5f, kBodyH - 17.f), brush_.Get());
             continue;
         }
         if (a.isControl) {
@@ -1412,6 +1478,7 @@ void Dock::Render() {
             rt_->GetTransform(&old);
             rt_->SetTransform(D2D1::Matrix3x2F::Scale(1.f + squash, 1.f - squash, D2D1::Point2F(a.x, bottom)) * old);
             if (a.isStart) DrawStart(a.x, bottom, size);
+            else if (a.isStack || a.isTrash) DrawFolderIcon(a, a.x, bottom, size, 1.f);
             else DrawIcon(a, a.x, bottom, size);
             rt_->SetTransform(old);
         } else {
@@ -1419,6 +1486,7 @@ void Dock::Render() {
             float op = 1.f;
             if (a.IsApp() && !a.active && !IsMusicApp(a)) op = 1.f - 0.6f * std::clamp(focusA_.value / 100.f, 0.f, 1.f);
             if (a.isStart) DrawStart(a.x, bottom, size);
+            else if (a.isStack || a.isTrash) DrawFolderIcon(a, a.x, bottom, size, 1.f);
             else DrawIcon(a, a.x, bottom, size, op);
         }
         if (a.attention) {
