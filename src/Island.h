@@ -14,6 +14,7 @@
 
 #include "Command.h"
 #include "Companion.h"
+#include "Dock.h"
 #include "Eyes.h"
 #include "Lyrics.h"
 #include "Weather.h"
@@ -98,7 +99,7 @@ private:
 
 public:
     // Araç çentiği (Tools.cpp): araç ızgarası, yazı tanıma, kahve, not, ekrana çizim, hızlı ayarlar
-    enum class Tool { Ocr, Shot, Picker, Coffee, Note, Ink, Quick, Focus, Calc, Sounds, Update, Sleep, Diary, Count };
+    enum class Tool { Ocr, Shot, Picker, Coffee, Note, Ink, Quick, Focus, Calc, Sounds, Update, Sleep, Diary, Dock, Count };
     static constexpr int kToolCount = static_cast<int>(Tool::Count);
     // Favori siteler: araç ızgarasının son sayfası. ToolHit bunlar için kFavHit + sıra döndürür,
     // "+" kutucuğu için kFavHit + kFavMax.
@@ -119,6 +120,7 @@ private:
     void PageWheel(int delta);
     void ToggleFocus();
     void ToggleSounds();
+    void ToggleDock();
     void StartUpdate();
     // Yazı tanıma
     void StartOcr();
@@ -293,6 +295,7 @@ private:
     // Direct2D / DirectWrite
     Microsoft::WRL::ComPtr<ID2D1Factory> d2d_;
     Microsoft::WRL::ComPtr<IDWriteFactory> dwrite_;
+    Dock dock_;  // yeni taskbar (Ayarlar > Guti Dock)
     Microsoft::WRL::ComPtr<ID2D1RenderTarget> rt_;      // çizimin yapıldığı hedef (GPU ya da yazılım)
     Microsoft::WRL::ComPtr<ID2D1DCRenderTarget> dcRt_;  // yazılım yedeği
     Microsoft::WRL::ComPtr<ID3D11Device> d3d_;

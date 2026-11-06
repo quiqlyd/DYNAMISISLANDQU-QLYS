@@ -89,6 +89,7 @@ constexpr wchar_t kGlyphOpen[] = L"\xE8A7";
 constexpr wchar_t kGlyphHeart[] = L"\xEB51";
 constexpr wchar_t kGlyphHeartFill[] = L"\xEB52";
 constexpr wchar_t kGlyphBook[] = L"\xE82D";
+constexpr wchar_t kGlyphDock[] = L"\xE71D";
 
 constexpr wchar_t kRunKey[] = L"Software\\Microsoft\\Windows\\CurrentVersion\\Run";
 constexpr wchar_t kRunValue[] = L"DynamisIsland";
