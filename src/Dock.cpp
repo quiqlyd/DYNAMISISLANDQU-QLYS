@@ -279,6 +279,19 @@ bool WifiConnected() {
     return wifi && !wired;
 }
 
+// Windows taskbar'ını görünmez yapar ya da geri getirir (başka sürecin penceresi; katmanlı saydamlık).
+void SetTrayInvisible(HWND tray, bool invisible) {
+    if (!tray) return;
+    LONG_PTR ex = GetWindowLongPtrW(tray, GWL_EXSTYLE);
+    if (invisible) {
+        SetWindowLongPtrW(tray, GWL_EXSTYLE, ex | WS_EX_LAYERED);
+        SetLayeredWindowAttributes(tray, 0, 0, LWA_ALPHA);
+    } else if (ex & WS_EX_LAYERED) {
+        SetLayeredWindowAttributes(tray, 0, 255, LWA_ALPHA);
+        SetWindowLongPtrW(tray, GWL_EXSTYLE, ex & ~static_cast<LONG_PTR>(WS_EX_LAYERED));
+    }
+}
+
 bool LightTheme() {
     DWORD v = 0, size = sizeof(v);
     if (RegGetValueW(HKEY_CURRENT_USER, L"Software\\Microsoft\\Windows\\CurrentVersion\\Themes\\Personalize",
@@ -415,6 +428,7 @@ private:
 // ---------------------------------------------------------------------------
 
 void Dock::RestoreTaskbarNow() {
+    SetTrayInvisible(FindWindowW(L"Shell_TrayWnd", nullptr), false);  // gizli simgeler sırasında saydam kaldıysa
     if (ReadSetting(L"DockTbHidden", 0) == 0) return;
     HWND tray = FindWindowW(L"Shell_TrayWnd", nullptr);
     if (tray) {
@@ -1836,6 +1850,7 @@ LRESULT Dock::OnOverlay(UINT msg, WPARAM wp, LPARAM lp) {
                 KillTimer(overlay_, kTimerTrayPeek);
                 trayPeekAt_ = -1;
                 if (tray_ && IsWindowVisible(tray_)) ShowWindow(tray_, SW_HIDE);
+                SetTrayInvisible(tray_, false);
             } else if (e > 0.25 && e < 0.4) {
                 // Win+B odağı "gizli simgeleri göster" okuna koydu: açmak için Enter
                 INPUT in[2] = {};
@@ -2289,10 +2304,11 @@ int Dock::TrayPart(float x) const {
 
 void Dock::OpenHiddenIcons() {
     // Gizli simgeler Windows'un kendi panelinde açılır. Panel taskbar'a bağlı olduğu için taskbar kısa süre
-    // görünür bırakılır (otomatik gizli olduğundan ekranın altında durur), panel kapanınca yine gizlenir.
+    // açılır ama tamamen saydamdır; panel kapanınca yine gizlenir ve saydamlığı geri alınır.
     if (!tray_) tray_ = FindWindowW(L"Shell_TrayWnd", nullptr);
     if (!tray_) return;
     trayPeekAt_ = Now();
+    SetTrayInvisible(tray_, true);  // taskbar'ın kendisi hiç görünmesin; yalnız paneli açılır
     ShowWindow(tray_, SW_SHOWNA);
     SendWinKey('B');
     SetTimer(overlay_, kTimerTrayPeek, 120, nullptr);
