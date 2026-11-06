@@ -78,6 +78,7 @@ void MediaService::Refresh() {
         try {
             auto props = s.TryGetMediaPropertiesAsync().get();
             snap.hasSession = true;
+            snap.sourceApp = s.SourceAppUserModelId().c_str();
             snap.title = props.Title().c_str();
             snap.artist = props.Artist().c_str();
 

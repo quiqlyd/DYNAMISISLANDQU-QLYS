@@ -35,6 +35,10 @@ public:
     void SetOnline(bool online);
     void SetAutoHide(bool on);
     bool AutoHide() const { return autoHide_; }
+    // 4. parti: Guti ile bağ
+    std::function<void()> onLaunch;  // bir uygulama açılıyor: adadaki Guti aşağı bakar
+    void SetMusic(const std::wstring& sourceApp, float level);
+    void SetFocus(bool on);
 
     // Uygulama kapanırken/çökerken Windows taskbar'ını geri getirir.
     static void RestoreTaskbarNow();
@@ -209,6 +213,13 @@ private:
     Spring hide_;           // otomatik gizlemede aşağı kayma (DIP)
     bool hideWanted_ = false;
     int presentedTop_ = 0;  // dokudan pencereye aktarılan ilk satır (px)
+    std::wstring musicApp_;  // küçük harf
+    float musicLevel_ = 0;
+    double musicFrameAt_ = 0;
+    bool focus_ = false;
+    Spring focusA_;          // odak modunda ilgisiz ikonların sönükleşmesi (0-100)
+    double blinkAt_ = -1;    // mini Guti göz kırpıyor
+    bool IsMusicApp(const App& a) const;
     float baseW_ = 0;    // büyütmesiz gövde genişliği
 
     std::vector<HWINEVENTHOOK> hooks_;

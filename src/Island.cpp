@@ -340,6 +340,11 @@ bool Island::Create(HINSTANCE instance) {
         Dock::RepairOnStartup(dockOn);  // önceki oturum taskbar'ı gizli bıraktıysa düzelt
         // Windows taskbar'ı (ve tepsi ikonu) gizliyken menüye dock'taki Guti'ye sağ tıklayarak ulaşılır.
         dock_.onMenu = [this] { ShowTrayMenu(); };
+        dock_.onLaunch = [this] {
+            lookDownUntil_ = Now() + 1.4;  // açılan uygulamaya, aşağıya bakar
+            eyes_.SetMood(Eyes::Mood::Curious, Now(), 1.2);
+            StartAnimation();
+        };
         dock_.onQuick = [this] {
             if (userHidden_) ToggleUserHidden();
             OpenQuick();
@@ -594,6 +599,7 @@ void Island::OnAnimationTick() {
         if (peak >= 0) {
             if (level_ < 0) level_ = 0;
             level_ = std::max(peak, level_ - dt * 2.2f);
+            if (snapshot_.playing) dock_.SetMusic(snapshot_.sourceApp, level_);
             float k = std::min(1.f, dt * 1.5f);
             avgLevel_ += (peak - avgLevel_) * k;
             if (peak > 0.06f && peak > avgLevel_ * 1.45f && time_ - lastBeat_ > 0.26) {
@@ -2830,6 +2836,7 @@ void Island::OnLookTimer() {
 
     if (commandMode_) eyes_.LookAt(0.7f, 0.15f);  // yazdıklarına bakar
     else if (noteMode_) eyes_.LookAt(0.35f, 0.7f);  // nota bakar
+    else if (now < lookDownUntil_) eyes_.LookAt(0.f, 1.f);  // dock'ta açılan uygulamaya bakar
     else eyes_.LookAt(dx / (700.f * scale_), dy / (380.f * scale_));
     if (eyes_.Tick(now) && ViewShowsEyes()) StartAnimation();
 }
@@ -3450,6 +3457,10 @@ LRESULT Island::WndProc(UINT msg, WPARAM wp, LPARAM lp) {
             break;
         case kTimerTick: {
             CheckFullscreen();
+            if (dock_.Enabled()) {
+                dock_.SetFocus(companion_.Kind() == Companion::TimerKind::Focus);
+                if (!snapshot_.playing) dock_.SetMusic(L"", 0.f);
+            }
             if (CheckSlim()) Update();
             OnCompanionTick();
             OnSleepTick();

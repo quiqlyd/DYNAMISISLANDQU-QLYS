@@ -17,6 +17,7 @@
 #include <unordered_map>
 
 #include "IslandUi.h"
+#include "Sounds.h"
 
 using Microsoft::WRL::ComPtr;
 using namespace isl;
@@ -51,6 +52,7 @@ constexpr UINT_PTR kTimerHoverLabel = 2;
 constexpr UINT_PTR kTimerPreview = 3;    // fare ikonda durunca önizleme açılır
 constexpr UINT_PTR kTimerPanelOut = 4;   // panel dışına çıkınca kapanır
 constexpr UINT_PTR kTimerAutoHide = 5;   // otomatik gizlemede fare ekranın altına geldi mi?
+constexpr UINT_PTR kTimerBlink = 6;      // mini Guti ara sıra göz kırpar
 
 constexpr wchar_t kPinnedDir[] = L"\\Microsoft\\Internet Explorer\\Quick Launch\\User Pinned\\TaskBar";
 
@@ -444,6 +446,9 @@ bool Dock::Enable(HINSTANCE instance, ID2D1Factory* d2d, IDWriteFactory* dwrite)
     ShowWindow(glass_, SW_SHOWNOACTIVATE);
     ShowWindow(overlay_, SW_SHOWNOACTIVATE);
     if (autoHide_) SetTimer(overlay_, kTimerAutoHide, 100, nullptr);
+    SetTimer(overlay_, kTimerBlink, 3500, nullptr);
+    focusA_.stiffness = 200.f;
+    focusA_.damping = 28.f;
     HideTaskbar();  // önce Windows taskbar'ı çekilsin ki dock'un yeri en alttan ayrılsın
     RegisterAppBar();
     StartAnimation();
@@ -840,8 +845,10 @@ void Dock::OnClick(int i) {
     ClosePanel();
     if (a.windows.empty()) {
         if (a.launch.empty()) return;
-        // Açılıyor: ikon pencere gelene kadar zıplar.
+        // Açılıyor: ikon pencere gelene kadar zıplar; adadaki Guti de dönüp bakar.
         a.launchAt = Now();
+        Sounds::Play(Sounds::Sound::Open);
+        if (onLaunch) onLaunch();
         StartAnimation();
         HINSTANCE r = ShellExecuteW(nullptr, L"open", a.launch.c_str(), nullptr, nullptr, SW_SHOWNORMAL);
         if (reinterpret_cast<INT_PTR>(r) <= 32) a.launchAt = -1;
@@ -1032,6 +1039,7 @@ void Dock::OnFrame() {
         moving |= labelA_.Step(step);
         moving |= panelA_.Step(step);
         moving |= hide_.Step(step);
+        moving |= focusA_.Step(step);
     }
     // Açılış zıplaması: pencere gelene kadar (en çok 7 sn) yumuşak yaylar; bir yayı yarıda kesmez.
     for (auto& a : apps_) {
@@ -1053,6 +1061,11 @@ void Dock::OnFrame() {
         else moving = true;
     }
     if (dragging_) moving = true;
+    if (blinkAt_ >= 0) {
+        if (t - blinkAt_ > 0.2) blinkAt_ = -1;
+        else moving = true;
+    }
+    focusA_.target = focus_ ? 100.f : 0.f;
     // Kapanmış (sabitli olmayan) uygulamalar küçülerek kaybolur.
     for (size_t i = apps_.size(); i-- > 0;) {
         App& a = apps_[i];
@@ -1234,10 +1247,32 @@ void Dock::DrawStart(float cx, float bottom, float size) {
     float ex = size * 0.17f, ew = size * 0.15f, eh = size * 0.30f;
     float ey = bottom - size * 0.52f;
     float dx = look * size * 0.07f;
+    bool happy = hover_ == 0;  // üstüne gelince sevinir: gözler ^ ^ olur
+    float blink = 1.f;
+    if (blinkAt_ >= 0) blink = 1.f - 0.9f * std::sin(3.14159265f * std::clamp(static_cast<float>(Now() - blinkAt_) / 0.2f, 0.f, 1.f));
+    brush_->SetColor(accent_);
     for (int s = -1; s <= 1; s += 2) {
         float x = cx + s * ex + dx;
-        D2D1_ROUNDED_RECT eye{D2D1::RectF(x - ew / 2, ey - eh / 2, x + ew / 2, ey + eh / 2), ew / 2, ew / 2};
-        brush_->SetColor(accent_);
+        if (happy) {
+            ComPtr<ID2D1PathGeometry> arc;
+            ComPtr<ID2D1GeometrySink> sink;
+            if (SUCCEEDED(d2d_->CreatePathGeometry(&arc)) && SUCCEEDED(arc->Open(&sink))) {
+                float hw = ew * 0.85f;
+                sink->BeginFigure(D2D1::Point2F(x - hw, ey + eh * 0.12f), D2D1_FIGURE_BEGIN_HOLLOW);
+                sink->AddQuadraticBezier(D2D1::QuadraticBezierSegment(D2D1::Point2F(x, ey - eh * 0.45f),
+                                                                      D2D1::Point2F(x + hw, ey + eh * 0.12f)));
+                sink->EndFigure(D2D1_FIGURE_END_OPEN);
+                sink->Close();
+                ComPtr<ID2D1StrokeStyle> round;
+                d2d_->CreateStrokeStyle(D2D1::StrokeStyleProperties(D2D1_CAP_STYLE_ROUND, D2D1_CAP_STYLE_ROUND,
+                                                                    D2D1_CAP_STYLE_ROUND),
+                                        nullptr, 0, &round);
+                rt_->DrawGeometry(arc.Get(), brush_.Get(), ew * 0.62f, round.Get());
+            }
+            continue;
+        }
+        float h = std::max(ew * 0.5f, eh * blink);
+        D2D1_ROUNDED_RECT eye{D2D1::RectF(x - ew / 2, ey - h / 2, x + ew / 2, ey + h / 2), ew / 2, ew / 2};
         rt_->FillRoundedRectangle(eye, brush_.Get());
     }
 }
@@ -1380,8 +1415,11 @@ void Dock::Render() {
             else DrawIcon(a, a.x, bottom, size);
             rt_->SetTransform(old);
         } else {
+            // Odak modu: öndeki ve müzik çalan dışındaki uygulamalar sönükleşir.
+            float op = 1.f;
+            if (a.IsApp() && !a.active && !IsMusicApp(a)) op = 1.f - 0.6f * std::clamp(focusA_.value / 100.f, 0.f, 1.f);
             if (a.isStart) DrawStart(a.x, bottom, size);
-            else DrawIcon(a, a.x, bottom, size);
+            else DrawIcon(a, a.x, bottom, size, op);
         }
         if (a.attention) {
             // Dikkat rozeti: ikonun sağ üst köşesinde turuncu nokta
@@ -1393,7 +1431,20 @@ void Dock::Render() {
         }
         // Açık göstergesi: küçük nokta; öndeki uygulamada vurgu renginde ve biraz daha uzun.
         float dot = std::clamp(a.dot.value / 100.f, 0.f, 1.f);
-        if (dot > 0.01f) {
+        if (dot > 0.01f && IsMusicApp(a)) {
+            // Müzik çalan uygulama: nokta yerine sesle oynayan üç minik çubuk
+            D2D1_COLOR_F c = a.active ? accent_ : (light_ ? Rgba(0, 0, 0, 0.6f) : Rgba(1, 1, 1, 0.75f));
+            brush_->SetColor(WithAlpha(c, dot));
+            float tt = static_cast<float>(Now());
+            for (int b = -1; b <= 1; ++b) {
+                float wob = 0.55f + 0.45f * std::sin(tt * (7.f + b * 2.3f) + b * 1.7f);
+                float hgt = 2.5f + 6.f * std::clamp(musicLevel_ * 1.6f, 0.f, 1.f) * wob;
+                float bx = a.x + b * 4.f;
+                float y1 = kBodyH - 2.5f;
+                rt_->FillRoundedRectangle(
+                    D2D1_ROUNDED_RECT{D2D1::RectF(bx - 1.1f, y1 - hgt, bx + 1.1f, y1), 1.1f, 1.1f}, brush_.Get());
+            }
+        } else if (dot > 0.01f) {
             float dw = (a.active ? 10.f : 4.f) * dot, dh = 4.f * dot;
             D2D1_COLOR_F c = a.active ? accent_ : (light_ ? Rgba(0, 0, 0, 0.55f) : Rgba(1, 1, 1, 0.60f));
             if (a.active && light_) c = Rgba(0.10f, 0.10f, 0.12f, 0.9f);
@@ -1562,6 +1613,10 @@ LRESULT Dock::OnOverlay(UINT msg, WPARAM wp, LPARAM lp) {
             CheckPanelHover();
         } else if (wp == kTimerAutoHide) {
             UpdateAutoHide();
+        } else if (wp == kTimerBlink) {
+            blinkAt_ = Now();
+            StartAnimation();
+            SetTimer(overlay_, kTimerBlink, 2600 + (GetTickCount() % 4000), nullptr);  // düzensiz aralık
         }
         return 0;
     case WM_MOUSEACTIVATE:
@@ -1682,6 +1737,7 @@ void Dock::SetPinned(int i, bool pinned) {
         a.appear.target = 0.f;  // küçülerek kaybolur
         Puff(a.x, kIconBottom - a.size / 2.f);
     }
+    Sounds::Play(pinned ? Sounds::Sound::Happy : Sounds::Sound::Close);
     SavePins();
     StartAnimation();
 }
@@ -1806,6 +1862,7 @@ void Dock::EndDrag(bool commit) {
             a.pinned = false;
             a.appear.Snap(0.f);  // sürüklenen ikon dock dışında "puf" diye kaybolur
             Puff(dragX_, dragY_);
+            Sounds::Play(Sounds::Sound::Close);
         } else {
             a.pinned = false;  // açık uygulama yerinde kalır, yalnız sabitlemesi kalkar
         }
@@ -2381,4 +2438,39 @@ void Dock::DrawPanel() {
         }
     }
     rt_->SetTransform(old);
+}
+
+// ---------------------------------------------------------------------------
+// 4. parti: Guti ile bağ (müzik ritmi, odak modu)
+// ---------------------------------------------------------------------------
+
+bool Dock::IsMusicApp(const App& a) const {
+    if (musicApp_.empty() || !a.IsApp() || a.windows.empty()) return false;
+    if (a.aumid == musicApp_) return true;
+    // Spotify "Spotify.exe", Chrome "Chrome" gibi kısa adlar: exe dosya adıyla karşılaştır.
+    size_t slash = a.exe.find_last_of(L'\\');
+    std::wstring file = slash == std::wstring::npos ? a.exe : a.exe.substr(slash + 1);
+    if (file == musicApp_) return true;
+    if (EndsWith(file, L".exe") && file.substr(0, file.size() - 4) == musicApp_) return true;
+    return !a.aumid.empty() && musicApp_.size() > 3 && a.aumid.rfind(musicApp_, 0) == 0;
+}
+
+void Dock::SetMusic(const std::wstring& sourceApp, float level) {
+    std::wstring app = Lower(sourceApp);
+    bool changed = app != musicApp_;
+    musicApp_ = app;
+    musicLevel_ = std::max(0.f, level);
+    if (!overlay_) return;
+    // Çubuklar ~25 kare/sn yeter: dock'u sürekli 60 Hz çizmeyelim.
+    double t = Now();
+    if (changed || (!musicApp_.empty() && t - musicFrameAt_ > 0.04)) {
+        musicFrameAt_ = t;
+        StartAnimation();
+    }
+}
+
+void Dock::SetFocus(bool on) {
+    if (on == focus_) return;
+    focus_ = on;
+    StartAnimation();
 }

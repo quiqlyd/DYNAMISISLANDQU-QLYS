@@ -19,6 +19,7 @@ struct MediaSnapshot {
     bool playing = false;
     std::wstring title;
     std::wstring artist;
+    std::wstring sourceApp;  // çalan uygulamanın AUMID'si (ör. Spotify.exe, Chrome)
     double positionSec = 0;   // stamp anındaki konum
     double durationSec = 0;
     std::chrono::steady_clock::time_point stamp{};
