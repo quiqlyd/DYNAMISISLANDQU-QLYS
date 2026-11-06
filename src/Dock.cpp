@@ -189,6 +189,71 @@ std::unordered_map<HWND, std::pair<std::wstring, std::wstring>> g_describeCache;
 
 }  // namespace
 
+// Dosyayı dock'taki bir uygulamanın üstüne bırakınca onunla açılır.
+class DockDrop : public IDropTarget {
+public:
+    explicit DockDrop(Dock* d) : dock_(d) {}
+    HRESULT STDMETHODCALLTYPE QueryInterface(REFIID riid, void** ppv) override {
+        if (riid == IID_IUnknown || riid == IID_IDropTarget) {
+            *ppv = static_cast<IDropTarget*>(this);
+            AddRef();
+            return S_OK;
+        }
+        *ppv = nullptr;
+        return E_NOINTERFACE;
+    }
+    ULONG STDMETHODCALLTYPE AddRef() override { return ++refs_; }
+    ULONG STDMETHODCALLTYPE Release() override {
+        ULONG r = --refs_;
+        if (!r) delete this;
+        return r;
+    }
+    HRESULT STDMETHODCALLTYPE DragEnter(IDataObject* data, DWORD, POINTL pt, DWORD* effect) override {
+        FORMATETC fe{CF_HDROP, nullptr, DVASPECT_CONTENT, -1, TYMED_HGLOBAL};
+        files_ = data && SUCCEEDED(data->QueryGetData(&fe));
+        return DragOver(0, pt, effect);
+    }
+    HRESULT STDMETHODCALLTYPE DragOver(DWORD, POINTL pt, DWORD* effect) override {
+        int hit = dock_->DropOver(POINT{pt.x, pt.y});
+        *effect = (files_ && hit >= 0) ? DROPEFFECT_COPY : DROPEFFECT_NONE;
+        return S_OK;
+    }
+    HRESULT STDMETHODCALLTYPE DragLeave() override {
+        dock_->DropOver(POINT{LONG_MIN, 0});
+        return S_OK;
+    }
+    HRESULT STDMETHODCALLTYPE Drop(IDataObject* data, DWORD, POINTL pt, DWORD* effect) override {
+        int hit = dock_->DropOver(POINT{pt.x, pt.y});
+        *effect = DROPEFFECT_NONE;
+        std::vector<std::wstring> paths;
+        FORMATETC fe{CF_HDROP, nullptr, DVASPECT_CONTENT, -1, TYMED_HGLOBAL};
+        STGMEDIUM sm{};
+        if (hit >= 0 && data && SUCCEEDED(data->GetData(&fe, &sm))) {
+            HDROP drop = static_cast<HDROP>(GlobalLock(sm.hGlobal));
+            if (drop) {
+                UINT n = DragQueryFileW(drop, 0xFFFFFFFF, nullptr, 0);
+                for (UINT k = 0; k < n; ++k) {
+                    wchar_t path[MAX_PATH * 2];
+                    if (DragQueryFileW(drop, k, path, ARRAYSIZE(path))) paths.push_back(path);
+                }
+                GlobalUnlock(sm.hGlobal);
+            }
+            ReleaseStgMedium(&sm);
+        }
+        dock_->DropOver(POINT{LONG_MIN, 0});
+        if (!paths.empty()) {
+            dock_->DropFiles(hit, paths);
+            *effect = DROPEFFECT_COPY;
+        }
+        return S_OK;
+    }
+
+private:
+    Dock* dock_;
+    ULONG refs_ = 1;
+    bool files_ = false;
+};
+
 // ---------------------------------------------------------------------------
 // Windows taskbar'ını gizleme / geri getirme
 // ---------------------------------------------------------------------------
@@ -336,6 +401,10 @@ bool Dock::Enable(HINSTANCE instance, ID2D1Factory* d2d, IDWriteFactory* dwrite)
     hook(EVENT_OBJECT_DESTROY, EVENT_OBJECT_HIDE);
     hook(EVENT_OBJECT_CLOAKED, EVENT_OBJECT_UNCLOAKED);
 
+    shellHookMsg_ = RegisterWindowMessageW(L"SHELLHOOK");
+    RegisterShellHookWindow(overlay_);  // "bana bak" (yanıp sönme) bildirimleri
+    drop_ = new DockDrop(this);
+    RegisterDragDrop(overlay_, drop_);
     g_prevFilter = SetUnhandledExceptionFilter(CrashFilter);
     OnFrame();  // ilk kare: pencereler yerine otursun
     ShowWindow(glass_, SW_SHOWNOACTIVATE);
@@ -359,6 +428,12 @@ void Dock::Disable() {
     RemoveAppBar();
     RestoreTaskbar();
     SetUnhandledExceptionFilter(g_prevFilter);
+    DeregisterShellHookWindow(overlay_);
+    RevokeDragDrop(overlay_);
+    if (drop_) drop_->Release();
+    drop_ = nullptr;
+    dragging_ = false;
+    pressed_ = hover_ = -1;
     DiscardDevice();
     if (memDC_) {
         SelectObject(memDC_, oldBmp_);
@@ -475,7 +550,7 @@ void Dock::LoadPins() {
             std::wstring l = Lower(p);
             return l.find(L"file explorer") != std::wstring::npos || l.find(L"dosya gezgini") != std::wstring::npos;
         });
-        SavePins();
+        SavePins(false);
     }
 
     apps_.clear();
@@ -511,7 +586,12 @@ void Dock::LoadPins() {
     }
 }
 
-void Dock::SavePins() {
+void Dock::SavePins(bool fromApps) {
+    if (fromApps) {
+        pinOrder_.clear();
+        for (const auto& a : apps_)
+            if (a.pinned && !a.launch.empty()) pinOrder_.push_back(a.launch);
+    }
     std::wstring multi;
     for (const auto& p : pinOrder_) {
         multi += p;
@@ -633,7 +713,10 @@ void Dock::Rescan() {
             app = &apps_.back();
         }
         app->windows.push_back(h);
-        if (h == fg || h == fgRoot) app->active = true;
+        if (h == fg || h == fgRoot) {
+            app->active = true;
+            app->attention = false;
+        }
     }
     g_describeCache.swap(keep);
     if (fullscreen_ && !ForegroundFullscreen()) SetFullscreen(false);
@@ -733,7 +816,8 @@ void Dock::Layout(float* bodyL, float* bodyR) {
     for (size_t i = 0; i < n; ++i) {
         App& a = apps_[i];
         a.w = w[i];
-        a.x = x + w[i] / 2.f;
+        a.x = x + w[i] / 2.f + a.slide.value;
+        if (dragging_ && static_cast<int>(i) == pressed_) a.x = dragX_;
         float appear = std::clamp(a.appear.value / 100.f, 0.f, 1.f);
         a.size = a.isSeparator ? 0.f : (kIcon + a.grow.value) * appear;
         x += w[i];
@@ -813,12 +897,12 @@ void Dock::OnFrame() {
         float c = acc + bw / 2.f;
         acc += bw;
         float g = 0;
-        if (mouseIn_ && !a.isSeparator && !fullscreen_) {
+        if (mouseIn_ && !a.isSeparator && !fullscreen_ && !(dragging_ && dragY_ < -40.f)) {
             float d = std::fabs(c - mouseX_);
             if (d < kRange) g = kMaxGrow * (std::cos(3.14159265f * d / kRange) + 1.f) / 2.f;
         }
         a.grow.target = g;
-        a.press.target = (pressed_ >= 0 && &apps_[pressed_] == &a && hover_ == pressed_) ? 5.f : 0.f;
+        a.press.target = (!dragging_ && pressed_ >= 0 && &apps_[pressed_] == &a && hover_ == pressed_) ? 5.f : 0.f;
     }
     labelA_.target = (hover_ >= 0 && pressed_ < 0) ? 100.f : 0.f;
 
@@ -838,6 +922,9 @@ void Dock::OnFrame() {
             moving |= a.press.Step(step);
             moving |= a.dot.Step(step);
             moving |= a.appear.Step(step);
+            a.slide.stiffness = 420.f;
+            a.slide.damping = 36.f;
+            moving |= a.slide.Step(step);
         }
         moving |= labelA_.Step(step);
     }
@@ -856,6 +943,11 @@ void Dock::OnFrame() {
         a.lift = kBounce * std::sin(3.14159265f * phase / kBouncePeriod);
         moving = true;
     }
+    if (puffAt_ >= 0) {
+        if (t - puffAt_ > 0.45) puffAt_ = -1;
+        else moving = true;
+    }
+    if (dragging_) moving = true;
     // Kapanmış (sabitli olmayan) uygulamalar küçülerek kaybolur.
     for (size_t i = apps_.size(); i-- > 0;) {
         App& a = apps_[i];
@@ -1041,11 +1133,11 @@ void Dock::DrawStart(float cx, float bottom, float size) {
     }
 }
 
-void Dock::DrawIcon(App& a, float cx, float bottom, float size) {
+void Dock::DrawIcon(App& a, float cx, float bottom, float size, float opacity) {
     ID2D1Bitmap* bmp = Icon(a);
     D2D1_RECT_F rc = D2D1::RectF(cx - size / 2, bottom - size, cx + size / 2, bottom);
     if (bmp) {
-        rt_->DrawBitmap(bmp, rc, 1.f, D2D1_BITMAP_INTERPOLATION_MODE_LINEAR);
+        rt_->DrawBitmap(bmp, rc, opacity, D2D1_BITMAP_INTERPOLATION_MODE_LINEAR);
         return;
     }
     // İkon yoksa: baş harfli yuvarlak kare
@@ -1160,6 +1252,8 @@ void Dock::Render() {
             continue;
         }
         if (a.size < 1.f) continue;
+        bool dragged = dragging_ && static_cast<int>(i) == pressed_;
+        if (dragged) continue;  // sürüklenen ikon en son, her şeyin üstünde çizilir
         float press = a.press.value;
         float size = a.size * (1.f - press / 60.f);
         float bottom = kIconBottom - a.lift - press * 0.25f;
@@ -1176,6 +1270,14 @@ void Dock::Render() {
             if (a.isStart) DrawStart(a.x, bottom, size);
             else DrawIcon(a, a.x, bottom, size);
         }
+        if (a.attention) {
+            // Dikkat rozeti: ikonun sağ üst köşesinde turuncu nokta
+            float bx = a.x + size * 0.38f, by = bottom - size * 0.88f, br = std::max(4.5f, size * 0.12f);
+            brush_->SetColor(light_ ? Rgba(1, 1, 1, 0.95f) : Rgba(0.08f, 0.08f, 0.10f, 0.95f));
+            rt_->FillEllipse(D2D1::Ellipse(D2D1::Point2F(bx, by), br + 1.5f, br + 1.5f), brush_.Get());
+            brush_->SetColor(kOrange);
+            rt_->FillEllipse(D2D1::Ellipse(D2D1::Point2F(bx, by), br, br), brush_.Get());
+        }
         // Açık göstergesi: küçük nokta; öndeki uygulamada vurgu renginde ve biraz daha uzun.
         float dot = std::clamp(a.dot.value / 100.f, 0.f, 1.f);
         if (dot > 0.01f) {
@@ -1189,8 +1291,30 @@ void Dock::Render() {
                 brush_.Get());
         }
     }
+    // Sürüklenen ikon: fareyi izler; dock'tan yukarı çıkınca solar ("bırakırsan kalkar").
+    if (dragging_ && pressed_ >= 0 && pressed_ < static_cast<int>(apps_.size())) {
+        App& a = apps_[pressed_];
+        float size = kIcon + kMaxGrow * 0.6f;
+        float cy = std::min(kIconBottom - size / 2.f, dragY_);
+        bool removing = dragY_ < -60.f && a.pinned && a.windows.empty();
+        DrawIcon(a, dragX_, cy + size / 2.f, size, removing ? 0.45f : 0.96f);
+    }
+    // Kaldırma "puf"u: dışa açılan, sönen küçük bulutçuklar
+    if (puffAt_ >= 0) {
+        float e = static_cast<float>(Now() - puffAt_) / 0.45f;
+        float k = EaseOut(e);
+        for (int j = 0; j < 7; ++j) {
+            float ang = j * 6.2831853f / 7.f + 0.4f;
+            float dist = 8.f + 22.f * k;
+            float rr = (7.f - 2.f * static_cast<float>(j % 3)) * (1.f - e * 0.6f);
+            brush_->SetColor(light_ ? Rgba(0.4f, 0.4f, 0.45f, 0.55f * (1 - e)) : Rgba(1, 1, 1, 0.55f * (1 - e)));
+            rt_->FillEllipse(
+                D2D1::Ellipse(D2D1::Point2F(puffX_ + std::cos(ang) * dist, puffY_ + std::sin(ang) * dist), rr, rr),
+                brush_.Get());
+        }
+    }
     // İsim balonu
-    int li = hover_ >= 0 ? hover_ : labelFor_;
+    int li = dragging_ ? -1 : (hover_ >= 0 ? hover_ : labelFor_);
     if (li >= 0 && li < static_cast<int>(apps_.size())) {
         labelFor_ = li;
         const App& a = apps_[li];
@@ -1295,6 +1419,10 @@ LRESULT Dock::OnOverlay(UINT msg, WPARAM wp, LPARAM lp) {
         *x = (overlayLeft_ + GET_X_LPARAM(l) - cxPx) / scale_;
         *y = GET_Y_LPARAM(l) / scale_ - kTopRoom;
     };
+    if (msg == shellHookMsg_ && shellHookMsg_) {
+        OnShellHook(wp, reinterpret_cast<HWND>(lp));
+        return 0;
+    }
     switch (msg) {
     case kFrameMsg:
         framePending_ = false;
@@ -1319,6 +1447,15 @@ LRESULT Dock::OnOverlay(UINT msg, WPARAM wp, LPARAM lp) {
             TrackMouseEvent(&tme);
             mouseIn_ = true;
         }
+        if (pressed_ >= 2 && !dragging_ && (wp & MK_LBUTTON)) {
+            POINT pt{GET_X_LPARAM(lp), GET_Y_LPARAM(lp)};
+            if (std::abs(pt.x - downPt_.x) + std::abs(pt.y - downPt_.y) > static_cast<int>(7 * scale_)) dragging_ = true;
+        }
+        if (dragging_) {
+            DragTo(x, y);
+            StartAnimation();
+            return 0;
+        }
         // Büyütme yalnız gövdenin üstündeyken başlar; büyümüş ikonların üstünde de sürer.
         mouseX_ = x;
         anchorX_ = x;
@@ -1335,6 +1472,8 @@ LRESULT Dock::OnOverlay(UINT msg, WPARAM wp, LPARAM lp) {
         float x, y;
         toDock(lp, &x, &y);
         pressed_ = HitTest(x, y);
+        downPt_ = POINT{GET_X_LPARAM(lp), GET_Y_LPARAM(lp)};
+        dragging_ = false;
         if (pressed_ >= 0) SetCapture(overlay_);
         StartAnimation();
         return 0;
@@ -1342,6 +1481,13 @@ LRESULT Dock::OnOverlay(UINT msg, WPARAM wp, LPARAM lp) {
     case WM_LBUTTONUP: {
         float x, y;
         toDock(lp, &x, &y);
+        if (dragging_) {
+            DragTo(x, y);
+            EndDrag(true);
+            if (GetCapture() == overlay_) ReleaseCapture();
+            StartAnimation();
+            return 0;
+        }
         int hit = HitTest(x, y);
         int p = pressed_;
         pressed_ = -1;
@@ -1350,10 +1496,21 @@ LRESULT Dock::OnOverlay(UINT msg, WPARAM wp, LPARAM lp) {
         StartAnimation();
         return 0;
     }
-    case WM_RBUTTONUP:
-        // Windows taskbar'ı gizli: tepsi ikonu da yok. Guti'nin menüsü buradan açılır.
-        if (onMenu) onMenu();
+    case WM_CAPTURECHANGED:
+        if (dragging_) EndDrag(false);
         return 0;
+    case WM_RBUTTONUP: {
+        float x, y;
+        toDock(lp, &x, &y);
+        int hit = HitTest(x, y);
+        if (hit >= 2) {
+            ShowAppMenu(hit);
+        } else if (onMenu) {
+            // Windows taskbar'ı gizli: tepsi ikonu da yok. Guti'nin menüsü buradan açılır.
+            onMenu();
+        }
+        return 0;
+    }
     case WM_DISPLAYCHANGE:
     case WM_DPICHANGED:
         UpdateMonitor();
@@ -1370,3 +1527,182 @@ LRESULT Dock::OnOverlay(UINT msg, WPARAM wp, LPARAM lp) {
     }
     return DefWindowProcW(overlay_, msg, wp, lp);
 }
+
+// ---------------------------------------------------------------------------
+// 2. parti: menü, sabitleme, sürükle sırala, dosya bırakma, dikkat rozeti
+// ---------------------------------------------------------------------------
+
+void Dock::SetPinned(int i, bool pinned) {
+    if (i < 2 || i >= static_cast<int>(apps_.size())) return;
+    App& a = apps_[i];
+    if (a.pinned == pinned || (pinned && a.launch.empty())) return;
+    a.pinned = pinned;
+    if (!pinned && a.windows.empty()) {
+        a.appear.target = 0.f;  // küçülerek kaybolur
+        Puff(a.x, kIconBottom - a.size / 2.f);
+    }
+    SavePins();
+    StartAnimation();
+}
+
+void Dock::Puff(float x, float y) {
+    puffAt_ = Now();
+    puffX_ = x;
+    puffY_ = y;
+    StartAnimation();
+}
+
+void Dock::ShowAppMenu(int i) {
+    App& a = apps_[i];
+    enum { kNew = 1, kPin, kUnpin, kClose, kCloseAll };
+    HMENU m = CreatePopupMenu();
+    AppendMenuW(m, MF_STRING | MF_GRAYED, 0, a.name.empty() ? L"Uygulama" : a.name.c_str());
+    AppendMenuW(m, MF_SEPARATOR, 0, nullptr);
+    if (!a.launch.empty()) AppendMenuW(m, MF_STRING, kNew, a.windows.empty() ? L"Aç" : L"Yeni pencere");
+    if (a.pinned) AppendMenuW(m, MF_STRING, kUnpin, L"Dock'tan kaldır");
+    else if (!a.launch.empty()) AppendMenuW(m, MF_STRING, kPin, L"Dock'ta tut");
+    if (!a.windows.empty()) {
+        AppendMenuW(m, MF_SEPARATOR, 0, nullptr);
+        if (a.windows.size() == 1) {
+            AppendMenuW(m, MF_STRING, kClose, L"Kapat");
+        } else {
+            wchar_t label[64];
+            swprintf_s(label, L"Tüm pencereleri kapat (%zu)", a.windows.size());
+            AppendMenuW(m, MF_STRING, kCloseAll, label);
+        }
+    }
+    POINT pt;
+    GetCursorPos(&pt);
+    SetForegroundWindow(overlay_);
+    hover_ = -1;
+    StartAnimation();
+    UINT cmd = TrackPopupMenu(m, TPM_RETURNCMD | TPM_RIGHTBUTTON | TPM_NONOTIFY | TPM_BOTTOMALIGN | TPM_CENTERALIGN,
+                              pt.x, pt.y - static_cast<int>(8 * scale_), 0, overlay_, nullptr);
+    DestroyMenu(m);
+    if (i >= static_cast<int>(apps_.size())) return;
+    App& b = apps_[i];
+    switch (cmd) {
+    case kNew:
+        if (b.windows.empty()) b.launchAt = Now();
+        ShellExecuteW(nullptr, L"open", b.launch.c_str(), nullptr, nullptr, SW_SHOWNORMAL);
+        break;
+    case kPin: SetPinned(i, true); break;
+    case kUnpin: SetPinned(i, false); break;
+    case kClose:
+    case kCloseAll:
+        for (HWND h : b.windows) PostMessageW(h, WM_CLOSE, 0, 0);
+        break;
+    }
+    StartAnimation();
+}
+
+void Dock::DragTo(float x, float y) {
+    dragX_ = x;
+    dragY_ = y;
+    mouseX_ = x;
+    anchorX_ = x;
+    if (pressed_ < 2 || pressed_ >= static_cast<int>(apps_.size())) return;
+    // Komşunun ortasını geçince yer değiştir; komşu yaylı kayarak yeni yerine gider.
+    for (;;) {
+        int i = pressed_;
+        App& me = apps_[i];
+        if (i + 1 < static_cast<int>(apps_.size()) && dragX_ > apps_[i + 1].x - apps_[i + 1].slide.value) {
+            apps_[i + 1].slide.value += me.w;
+            std::swap(apps_[i], apps_[i + 1]);
+            pressed_ = i + 1;
+        } else if (i - 1 >= 2 && dragX_ < apps_[i - 1].x - apps_[i - 1].slide.value) {
+            apps_[i - 1].slide.value -= me.w;
+            std::swap(apps_[i], apps_[i - 1]);
+            pressed_ = i - 1;
+        } else {
+            break;
+        }
+        float l, r;
+        Layout(&l, &r);
+    }
+    hover_ = pressed_;
+}
+
+void Dock::EndDrag(bool commit) {
+    if (!dragging_) return;
+    dragging_ = false;
+    int i = pressed_;
+    pressed_ = -1;
+    if (i < 2 || i >= static_cast<int>(apps_.size())) return;
+    App& a = apps_[i];
+    // Bıraktığı yerden yerine kayarak otursun.
+    float l, r;
+    Layout(&l, &r);
+    a.slide.value += dragX_ - a.x;
+    if (commit && dragY_ < -60.f && a.pinned) {
+        if (a.windows.empty()) {
+            a.slide.Snap(0.f);
+            a.pinned = false;
+            a.appear.Snap(0.f);  // sürüklenen ikon dock dışında "puf" diye kaybolur
+            Puff(dragX_, dragY_);
+        } else {
+            a.pinned = false;  // açık uygulama yerinde kalır, yalnız sabitlemesi kalkar
+        }
+    }
+    SavePins();
+    StartAnimation();
+}
+
+void Dock::OnShellHook(WPARAM code, HWND hwnd) {
+    switch (code) {
+    case HSHELL_FLASH:
+        for (auto& a : apps_) {
+            if (std::find(a.windows.begin(), a.windows.end(), hwnd) == a.windows.end()) continue;
+            if (!a.active && !a.attention) {
+                a.attention = true;
+                a.launchAt = Now();  // bir iki kez zıplar
+                StartAnimation();
+            }
+        }
+        break;
+    case HSHELL_WINDOWACTIVATED:
+    case HSHELL_RUDEAPPACTIVATED:
+        for (auto& a : apps_)
+            if (std::find(a.windows.begin(), a.windows.end(), hwnd) != a.windows.end()) a.attention = false;
+        SetTimer(overlay_, kTimerRescan, 30, nullptr);
+        break;
+    case HSHELL_WINDOWCREATED:
+    case HSHELL_WINDOWDESTROYED:
+        SetTimer(overlay_, kTimerRescan, 120, nullptr);
+        break;
+    }
+}
+
+int Dock::DropOver(POINT screen) {
+    if (screen.x == LONG_MIN) {
+        mouseIn_ = false;
+        hover_ = -1;
+        StartAnimation();
+        return -1;
+    }
+    float cxPx = (monitor_.left + monitor_.right) / 2.f;
+    float x = (screen.x - cxPx) / scale_;
+    float y = (screen.y - (monitor_.bottom - texH_)) / scale_ - kTopRoom;
+    mouseIn_ = true;
+    mouseX_ = anchorX_ = x;
+    int hit = HitTest(x, y);
+    hover_ = hit;
+    StartAnimation();
+    return (hit >= 2 && !apps_[hit].launch.empty()) ? hit : -1;
+}
+
+void Dock::DropFiles(int i, const std::vector<std::wstring>& paths) {
+    if (i < 2 || i >= static_cast<int>(apps_.size()) || paths.empty()) return;
+    App& a = apps_[i];
+    std::wstring params;
+    for (const auto& p : paths) {
+        if (!params.empty()) params += L' ';
+        params += L'"' + p + L'"';
+    }
+    // Exe'yi biliyorsak doğrudan ona ver; yoksa kısayolu dosyalarla aç.
+    const std::wstring& target = (!a.exe.empty() && a.launch.rfind(L"shell:", 0) != 0) ? a.exe : a.launch;
+    if (a.windows.empty()) a.launchAt = Now();
+    ShellExecuteW(nullptr, L"open", target.c_str(), params.c_str(), nullptr, SW_SHOWNORMAL);
+    StartAnimation();
+}
+
