@@ -370,6 +370,7 @@ private:
     // Guti'nin beyni: zamanlayıcı, odak, mola, dostluk
     Companion companion_;
     double reunionAt_ = 0;
+    double lookDownUntil_ = 0;
 
     // Guti'nin duyuları
     SystemHealth health_;
