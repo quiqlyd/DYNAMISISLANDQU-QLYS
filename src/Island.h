@@ -116,6 +116,7 @@ private:
     void DrawTools(View v, float w);
     void RunTool(Tool t);
     void SetToolPage(int page);
+    void PageWheel(int delta);
     void ToggleFocus();
     void ToggleSounds();
     void StartUpdate();
@@ -424,6 +425,10 @@ private:
 
     // Araç çentiği
     int toolPage_ = 0;
+    float swipeX0_ = -1;  // araç sırasında basılan yer (sürükleyerek sayfa çevirme)
+    bool swipeMoved_ = false;
+    int wheelAcc_ = 0;
+    double lastPageFlip_ = 0;
     int hoverTool_ = -1;
     Spring pageX_, toolGlow_[kToolCount];
     bool ocrPending_ = false;
