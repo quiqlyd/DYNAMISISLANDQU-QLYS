@@ -1937,11 +1937,11 @@ void Dock::UpdateAutoHide() {
     bool inMonitor = pt.x >= monitor_.left && pt.x < monitor_.right;
     bool atBottom = inMonitor && pt.y >= monitor_.bottom - 2;
     bool shown = hide_.target <= 0.f;
-    RECT near = glassRect_;
-    InflateRect(&near, static_cast<int>(30 * scale_), 0);
-    near.top -= static_cast<LONG>((kMaxGrow + 30.f) * scale_);
-    near.bottom = monitor_.bottom;
-    bool overDock = shown && PtInRect(&near, pt);
+    RECT nearRc = glassRect_;
+    InflateRect(&nearRc, static_cast<int>(30 * scale_), 0);
+    nearRc.top -= static_cast<LONG>((kMaxGrow + 30.f) * scale_);
+    nearRc.bottom = monitor_.bottom;
+    bool overDock = shown && PtInRect(&nearRc, pt);
     double t = Now();
     if (atBottom || overDock || panel_ != Panel::None || dragging_ || pressed_ >= 0) keepShownAt_ = t;
     // Fare ayrıldıktan biraz sonra (0.7 sn) aşağı kayar; alta değince yukarı çıkar.
