@@ -2315,6 +2315,21 @@ BOOL CALLBACK CollectVisible(HWND h, LPARAM lp) {
     fe->list->push_back(h);
     return TRUE;
 }
+bool IsShellProcess(HWND h) {
+    DWORD pid = 0;
+    GetWindowThreadProcessId(h, &pid);
+    HANDLE p = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, FALSE, pid);
+    if (!p) return false;
+    wchar_t path[MAX_PATH] = {};
+    DWORD n = MAX_PATH;
+    bool ok = QueryFullProcessImageNameW(p, 0, path, &n) != FALSE;
+    CloseHandle(p);
+    if (!ok) return false;
+    const wchar_t* name = wcsrchr(path, L'\\');
+    name = name ? name + 1 : path;
+    return !_wcsicmp(name, L"explorer.exe") || !_wcsicmp(name, L"ShellExperienceHost.exe") ||
+           !_wcsicmp(name, L"ShellHost.exe") || !_wcsicmp(name, L"StartMenuExperienceHost.exe");
+}
 std::vector<HWND> VisibleTopWindows() {
     std::vector<HWND> v;
     FlyEnum fe{&v, GetCurrentProcessId()};
@@ -2346,6 +2361,7 @@ void Dock::MoveFlyouts() {
         wchar_t cls[96] = {};
         GetClassNameW(h, cls, ARRAYSIZE(cls));
         if (!wcscmp(cls, L"tooltips_class32") || !wcscmp(cls, L"Shell_TrayWnd") || !wcscmp(cls, L"IME")) continue;
+        if (!IsShellProcess(h)) continue;  // yalnız Windows'un kendi panelleri; açılan uygulama pencerelerine dokunma
         RECT r;
         if (!GetWindowRect(h, &r)) continue;
         int w = r.right - r.left, ht = r.bottom - r.top;
