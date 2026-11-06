@@ -5,6 +5,7 @@
 #include <dwmapi.h>
 #include <dxgi1_2.h>
 #include <shellapi.h>
+#include <shlwapi.h>
 #include <shlobj.h>
 #include <shobjidl.h>
 #include <propsys.h>
@@ -27,21 +28,21 @@ using namespace isl;
 namespace {
 
 // Ölçüler (DIP)
-constexpr float kIcon = 40.f;      // ikon boyu
-constexpr float kSlot = 50.f;      // ikon + aralık
-constexpr float kSepW = 14.f;      // ayırıcı genişliği
-constexpr float kBodyH = 56.f;     // cam gövde yüksekliği
+constexpr float kIcon = 30.f;      // ikon boyu
+constexpr float kSlot = 44.f;      // ikon + aralık
+constexpr float kSepW = 8.f;       // ayırıcı genişliği
+constexpr float kBodyH = 48.f;     // cam gövde yüksekliği
 constexpr float kBottom = 6.f;     // ekranın altından boşluk
 constexpr float kPadX = 8.f;       // gövde iç yan boşluğu
-constexpr float kRadius = 18.f;    // gövde köşe yarıçapı
-constexpr float kMaxGrow = 20.f;   // büyütme: 40 -> 60 (1.5x)
+constexpr float kRadius = 14.f;    // gövde köşe yarıçapı
+constexpr float kMaxGrow = 0.f;    // büyütme yok: sade, Windows tarzı
 constexpr float kRange = 150.f;    // büyütmenin etki yarıçapı
 constexpr float kTopRoom = 96.f;   // gövdenin üstünde büyüyen ikon + isim balonu için yer
 constexpr float kSideRoom = 110.f; // yanlarda büyüme ve gölge payı
-constexpr float kIconBottom = kBodyH - (kBodyH - kIcon) / 2.f;
-constexpr float kBounce = 15.f, kBouncePeriod = 0.62f;
+constexpr float kIconBottom = kBodyH - (kBodyH - kIcon) / 2.f - 1.5f;
+constexpr float kBounce = 6.f, kBouncePeriod = 0.62f;
 constexpr float kPanelRoom = 330.f; // önizleme / yığın paneli için gövdenin üstünde ek yer
-constexpr float kControlW = 86.f;   // kontrol hapı genişliği
+constexpr float kControlW = 80.f;   // kontrol hapı genişliği
 constexpr float kCardW = 196.f, kThumbH = 116.f, kCardGap = 10.f, kPanelPad = 10.f;
 constexpr float kStackW = 300.f, kStackRow = 30.f;
 constexpr int kStackMax = 8;
@@ -162,6 +163,82 @@ void ResolveLink(const std::wstring& lnk, std::wstring& exe, std::wstring& aumid
         if (SUCCEEDED(store->GetValue(kAumidKey, &pv)) && pv.vt == VT_LPWSTR && pv.pwszVal) aumid = pv.pwszVal;
         PropVariantClear(&pv);
     }
+}
+
+// Uygulamanın Windows görev çubuğundaki "Görevler" listesi (ör. Edge: Yeni pencere, Yeni InPrivate penceresi).
+// Uygulamalar bu listeyi CustomDestinations klasörüne kaydeder; dosyadaki her kısayol bir ShellLink akışıdır.
+struct JumpTask {
+    std::wstring title, path, args, dir;
+};
+std::vector<JumpTask> JumpTasks(const std::wstring& exeLower) {
+    std::vector<JumpTask> out;
+    if (exeLower.empty()) return out;
+    PWSTR roaming = nullptr;
+    if (FAILED(SHGetKnownFolderPath(FOLDERID_RoamingAppData, 0, nullptr, &roaming)) || !roaming) return out;
+    std::wstring dir = std::wstring(roaming) + L"\\Microsoft\\Windows\\Recent\\CustomDestinations\\";
+    CoTaskMemFree(roaming);
+    static const BYTE kLinkClsid[16] = {0x01, 0x14, 0x02, 0x00, 0x00, 0x00, 0x00, 0x00,
+                                        0xC0, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x46};
+    const PROPERTYKEY kTitle = {{0xF29F85E0, 0x4FF9, 0x1068, {0xAB, 0x91, 0x08, 0x00, 0x2B, 0x27, 0xB3, 0xD9}}, 2};
+    WIN32_FIND_DATAW fd;
+    HANDLE find = FindFirstFileW((dir + L"*.customDestinations-ms").c_str(), &fd);
+    if (find == INVALID_HANDLE_VALUE) return out;
+    do {
+        if (fd.nFileSizeHigh || fd.nFileSizeLow > 4 * 1024 * 1024) continue;
+        HANDLE f = CreateFileW((dir + fd.cFileName).c_str(), GENERIC_READ, FILE_SHARE_READ | FILE_SHARE_WRITE, nullptr,
+                               OPEN_EXISTING, 0, nullptr);
+        if (f == INVALID_HANDLE_VALUE) continue;
+        std::vector<BYTE> buf(fd.nFileSizeLow);
+        DWORD got = 0;
+        BOOL ok = ReadFile(f, buf.data(), static_cast<DWORD>(buf.size()), &got, nullptr);
+        CloseHandle(f);
+        if (!ok || got != buf.size()) continue;
+        std::vector<JumpTask> found;
+        bool mine = false;
+        for (size_t off = 0; off + 16 < buf.size(); ++off) {
+            if (memcmp(buf.data() + off, kLinkClsid, 16) != 0) continue;
+            ComPtr<IStream> stream;
+            stream.Attach(SHCreateMemStream(buf.data() + off + 16, static_cast<UINT>(buf.size() - off - 16)));
+            ComPtr<IShellLinkW> link;
+            ComPtr<IPersistStream> ps;
+            if (!stream || FAILED(CoCreateInstance(CLSID_ShellLink, nullptr, CLSCTX_INPROC_SERVER, IID_PPV_ARGS(&link))) ||
+                FAILED(link.As(&ps)) || FAILED(ps->Load(stream.Get())))
+                continue;
+            JumpTask t;
+            wchar_t tmp[2048] = {};
+            if (SUCCEEDED(link->GetPath(tmp, ARRAYSIZE(tmp), nullptr, SLGP_RAWPATH)) && tmp[0]) {
+                wchar_t ex[2048];
+                t.path = ExpandEnvironmentStringsW(tmp, ex, ARRAYSIZE(ex)) ? ex : tmp;
+            }
+            tmp[0] = 0;
+            if (SUCCEEDED(link->GetArguments(tmp, ARRAYSIZE(tmp)))) t.args = tmp;
+            tmp[0] = 0;
+            if (SUCCEEDED(link->GetWorkingDirectory(tmp, ARRAYSIZE(tmp)))) t.dir = tmp;
+            ComPtr<IPropertyStore> store;
+            if (SUCCEEDED(link.As(&store))) {
+                PROPVARIANT pv;
+                PropVariantInit(&pv);
+                if (SUCCEEDED(store->GetValue(kTitle, &pv)) && pv.vt == VT_LPWSTR && pv.pwszVal) t.title = pv.pwszVal;
+                PropVariantClear(&pv);
+            }
+            if (!t.title.empty() && t.title[0] == L'@') {
+                wchar_t res[512];
+                if (SUCCEEDED(SHLoadIndirectString(t.title.c_str(), res, ARRAYSIZE(res), nullptr))) t.title = res;
+            }
+            if (t.path.empty() || t.title.empty()) continue;
+            std::wstring lp = t.path;
+            for (auto& ch : lp) ch = static_cast<wchar_t>(std::towlower(ch));
+            if (lp == exeLower) mine = true;
+            found.push_back(std::move(t));
+        }
+        if (mine) {
+            for (auto& t : found) out.push_back(std::move(t));
+            break;
+        }
+    } while (FindNextFileW(find, &fd));
+    FindClose(find);
+    if (out.size() > 10) out.resize(10);
+    return out;
 }
 
 bool LightTheme() {
@@ -491,7 +568,6 @@ bool Dock::Enable(HINSTANCE instance, ID2D1Factory* d2d, IDWriteFactory* dwrite)
     DockLog("enable autoHide=%d timer=%d fx=%d scale=%.2f mon=%ld,%ld,%ld,%ld", autoHide_ ? 1 : 0,
             static_cast<int>(ht), glassFx_.Attached() ? 1 : 0, scale_, monitor_.left, monitor_.top, monitor_.right,
             monitor_.bottom);
-    SetTimer(overlay_, kTimerBlink, 3500, nullptr);
     SetTimer(overlay_, kTimerWatch, 50, nullptr);
     focusA_.stiffness = 200.f;
     focusA_.damping = 28.f;
@@ -681,29 +757,10 @@ void Dock::LoadPins() {
         if (a.name.empty()) a.name = ShellName(path);
         apps_.push_back(std::move(a));
     }
-    // Sağ uç: ayırıcı, İndirilenler, Geri Dönüşüm Kutusu, kontrol hapı
+    // Sağ uç: (görünmez) ayırıcı ve kontrol hapı
     App sep2;
     sep2.isSeparator = true;
     apps_.push_back(std::move(sep2));
-    {
-        App d;
-        d.isStack = true;
-        PWSTR p = nullptr;
-        if (SUCCEEDED(SHGetKnownFolderPath(FOLDERID_Downloads, 0, nullptr, &p)) && p) {
-            downloads_ = p;
-            CoTaskMemFree(p);
-        }
-        d.launch = downloads_;
-        d.name = L"İndirilenler";
-        apps_.push_back(std::move(d));
-    }
-    {
-        App t;
-        t.isTrash = true;
-        t.launch = L"::{645FF040-5081-101B-9F08-00AA002F954E}";
-        t.name = L"Geri Dönüşüm Kutusu";
-        apps_.push_back(std::move(t));
-    }
     {
         App c;
         c.isControl = true;
@@ -1064,6 +1121,7 @@ void Dock::OnFrame() {
             if (d < kRange) g = kMaxGrow * (std::cos(3.14159265f * d / kRange) + 1.f) / 2.f;
         }
         a.grow.target = g;
+        a.hov.target = (!dragging_ && hover_ >= 0 && &apps_[hover_] == &a && !a.isSeparator && !a.isControl) ? 100.f : 0.f;
         a.press.target = (!dragging_ && pressed_ >= 0 && &apps_[pressed_] == &a && hover_ == pressed_) ? 5.f : 0.f;
     }
     labelA_.target = (hover_ >= 0 && pressed_ < 0 && panel_ == Panel::None) ? 100.f : 0.f;
@@ -1085,6 +1143,9 @@ void Dock::OnFrame() {
             moving |= a.press.Step(step);
             moving |= a.dot.Step(step);
             moving |= a.appear.Step(step);
+            a.hov.stiffness = 520.f;
+            a.hov.damping = 46.f;
+            moving |= a.hov.Step(step);
             a.slide.stiffness = 420.f;
             a.slide.damping = 36.f;
             moving |= a.slide.Step(step);
@@ -1328,6 +1389,25 @@ void Dock::DrawStart(float cx, float bottom, float size) {
     }
 }
 
+void Dock::DrawWindowsLogo(float cx, float bottom, float size) {
+    // Başlat: dört karelik Windows logosu, mavi geçişli.
+    float s = size * 0.70f, gap = std::max(1.5f, s * 0.06f), q = (s - gap) / 2.f;
+    float l = cx - s / 2.f, t = bottom - size / 2.f - s / 2.f;
+    ComPtr<ID2D1GradientStopCollection> stops;
+    D2D1_GRADIENT_STOP gs[2] = {{0.f, Rgba(0.33f, 0.75f, 1.f)}, {1.f, Rgba(0.02f, 0.43f, 0.87f)}};
+    rt_->CreateGradientStopCollection(gs, 2, &stops);
+    ComPtr<ID2D1LinearGradientBrush> fill;
+    if (!stops || FAILED(rt_->CreateLinearGradientBrush(
+                      D2D1::LinearGradientBrushProperties(D2D1::Point2F(l, t), D2D1::Point2F(l + s, t + s)),
+                      stops.Get(), &fill)))
+        return;
+    for (int y = 0; y < 2; ++y)
+        for (int x = 0; x < 2; ++x) {
+            float x0 = l + x * (q + gap), y0 = t + y * (q + gap);
+            rt_->FillRoundedRectangle(D2D1_ROUNDED_RECT{D2D1::RectF(x0, y0, x0 + q, y0 + q), 1.2f, 1.2f}, fill.Get());
+        }
+}
+
 void Dock::DrawIcon(App& a, float cx, float bottom, float size, float opacity) {
     ID2D1Bitmap* bmp = Icon(a);
     D2D1_RECT_F rc = D2D1::RectF(cx - size / 2, bottom - size, cx + size / 2, bottom);
@@ -1442,61 +1522,29 @@ void Dock::Render() {
 
     float bw = bodyR - bodyL;
     float r = bodyRadius_;
-    // Yumuşak, geniş gölge: yalnız gövdenin dışında (camı karartmasın), hafif aşağı kayık.
-    for (int i = 16; i >= 1; --i) {
+    // Hafif, kısa gölge
+    for (int i = 8; i >= 1; --i) {
         float d = i * 1.5f;
-        float k = 1.f - i / 17.f;
-        float a = (light_ ? 0.034f : 0.060f) * k * k;
+        float k = 1.f - i / 9.f;
+        float a = (light_ ? 0.022f : 0.045f) * k * k;
         brush_->SetColor(Rgba(0, 0, 0, a));
-        D2D1_ROUNDED_RECT rr{D2D1::RectF(bodyL - d + 0.75f, -d + 4.f, bodyR + d - 0.75f, kBodyH + d + 4.f), r + d, r + d};
+        D2D1_ROUNDED_RECT rr{D2D1::RectF(bodyL - d + 0.75f, -d + 2.f, bodyR + d - 0.75f, kBodyH + d + 2.f), r + d, r + d};
         rt_->DrawRoundedRectangle(rr, brush_.Get(), 1.6f);
     }
-    // Gövde: camın üstüne çok hafif bir dolgu (tıklamaları yakalasın) ve üstte yumuşak bir ışık.
+    // Gövde: düz, sade cam; yalnız ince bir kenar çizgisi (parlama yok).
     D2D1_ROUNDED_RECT body{D2D1::RectF(bodyL, 0, bodyR, kBodyH), r, r};
-    brush_->SetColor(light_ ? Rgba(1, 1, 1, 0.06f) : Rgba(1, 1, 1, 0.025f));
+    brush_->SetColor(light_ ? Rgba(1, 1, 1, 0.05f) : Rgba(1, 1, 1, 0.02f));
     rt_->FillRoundedRectangle(body, brush_.Get());
-    {
-        ComPtr<ID2D1GradientStopCollection> stops;
-        D2D1_GRADIENT_STOP gs[3] = {{0.f, Rgba(1, 1, 1, light_ ? 0.26f : 0.085f)},
-                                    {0.5f, Rgba(1, 1, 1, light_ ? 0.06f : 0.015f)},
-                                    {1.f, Rgba(1, 1, 1, 0.f)}};
-        rt_->CreateGradientStopCollection(gs, 3, &stops);
-        ComPtr<ID2D1LinearGradientBrush> sheen;
-        if (stops &&
-            SUCCEEDED(rt_->CreateLinearGradientBrush(
-                D2D1::LinearGradientBrushProperties(D2D1::Point2F(0, 0), D2D1::Point2F(0, kBodyH)),
-                stops.Get(), &sheen))) {
-            rt_->FillRoundedRectangle(body, sheen.Get());
-        }
-    }
-    // Dış ince çizgi: cam gövdeyi arka plandan ayırır (açıkta gri, koyuda siyah).
-    brush_->SetColor(light_ ? Rgba(0, 0, 0, 0.10f) : Rgba(0, 0, 0, 0.45f));
-    rt_->DrawRoundedRectangle(D2D1_ROUNDED_RECT{D2D1::RectF(bodyL - 0.5f, -0.5f, bodyR + 0.5f, kBodyH + 0.5f), r + 0.5f, r + 0.5f},
-                              brush_.Get(), 1.f);
-    // İç kenar ışığı: üstte parlak, altta silik.
-    {
-        ComPtr<ID2D1GradientStopCollection> stops;
-        D2D1_GRADIENT_STOP gs[2] = {{0.f, light_ ? Rgba(1, 1, 1, 0.90f) : Rgba(1, 1, 1, 0.26f)},
-                                    {1.f, light_ ? Rgba(1, 1, 1, 0.30f) : Rgba(1, 1, 1, 0.06f)}};
-        rt_->CreateGradientStopCollection(gs, 2, &stops);
-        ComPtr<ID2D1LinearGradientBrush> rim;
-        if (stops && SUCCEEDED(rt_->CreateLinearGradientBrush(
-                         D2D1::LinearGradientBrushProperties(D2D1::Point2F(0, 0), D2D1::Point2F(0, kBodyH)),
-                         stops.Get(), &rim))) {
-            D2D1_ROUNDED_RECT edge{D2D1::RectF(bodyL + 0.5f, 0.5f, bodyR - 0.5f, kBodyH - 0.5f), r - 0.5f, r - 0.5f};
-            rt_->DrawRoundedRectangle(edge, rim.Get(), 1.f);
-        }
-    }
+    brush_->SetColor(light_ ? Rgba(0, 0, 0, 0.09f) : Rgba(1, 1, 1, 0.10f));
+    rt_->DrawRoundedRectangle(
+        D2D1_ROUNDED_RECT{D2D1::RectF(bodyL + 0.5f, 0.5f, bodyR - 0.5f, kBodyH - 0.5f), r - 0.5f, r - 0.5f},
+        brush_.Get(), 1.f);
     (void)bw;
 
     // Öğeler
     for (size_t i = 0; i < apps_.size(); ++i) {
         App& a = apps_[i];
-        if (a.isSeparator) {
-            brush_->SetColor(light_ ? Rgba(0, 0, 0, 0.12f) : Rgba(1, 1, 1, 0.14f));
-            rt_->FillRectangle(D2D1::RectF(a.x - 0.5f, 14.f, a.x + 0.5f, kBodyH - 14.f), brush_.Get());
-            continue;
-        }
+        if (a.isSeparator) continue;  // sade görünüm: ayırıcı yalnız küçük bir boşluk
         if (a.isControl) {
             DrawControl(a);
             continue;
@@ -1504,6 +1552,18 @@ void Dock::Render() {
         if (a.size < 1.f) continue;
         bool dragged = dragging_ && static_cast<int>(i) == pressed_;
         if (dragged) continue;  // sürüklenen ikon en son, her şeyin üstünde çizilir
+        {
+            // Windows 11 tarzı: üzerine gelince ve öndeki uygulamada ikonun arkasında yumuşak bir kare.
+            float hv = std::clamp(a.hov.value / 100.f, 0.f, 1.f);
+            float act = (a.active && a.IsApp()) ? 1.f : 0.f;
+            float al = light_ ? (0.055f * hv + 0.045f * act) : (0.085f * hv + 0.065f * act);
+            if (al > 0.003f) {
+                float hw = (kSlot - 6.f) / 2.f;
+                brush_->SetColor(light_ ? Rgba(0, 0, 0, al) : Rgba(1, 1, 1, al));
+                rt_->FillRoundedRectangle(
+                    D2D1_ROUNDED_RECT{D2D1::RectF(a.x - hw, 4.f, a.x + hw, kBodyH - 4.f), 8.f, 8.f}, brush_.Get());
+            }
+        }
         float press = a.press.value;
         float size = a.size * (1.f - press / 60.f);
         float bottom = kIconBottom - a.lift - press * 0.25f;
@@ -1513,7 +1573,7 @@ void Dock::Render() {
             D2D1::Matrix3x2F old;
             rt_->GetTransform(&old);
             rt_->SetTransform(D2D1::Matrix3x2F::Scale(1.f + squash, 1.f - squash, D2D1::Point2F(a.x, bottom)) * old);
-            if (a.isStart) DrawStart(a.x, bottom, size);
+            if (a.isStart) DrawWindowsLogo(a.x, bottom, size);
             else if (a.isStack || a.isTrash) DrawFolderIcon(a, a.x, bottom, size, 1.f);
             else DrawIcon(a, a.x, bottom, size);
             rt_->SetTransform(old);
@@ -1521,7 +1581,7 @@ void Dock::Render() {
             // Odak modu: öndeki ve müzik çalan dışındaki uygulamalar sönükleşir.
             float op = 1.f;
             if (a.IsApp() && !a.active && !IsMusicApp(a)) op = 1.f - 0.6f * std::clamp(focusA_.value / 100.f, 0.f, 1.f);
-            if (a.isStart) DrawStart(a.x, bottom, size);
+            if (a.isStart) DrawWindowsLogo(a.x, bottom, size);
             else if (a.isStack || a.isTrash) DrawFolderIcon(a, a.x, bottom, size, 1.f);
             else DrawIcon(a, a.x, bottom, size, op);
         }
@@ -1544,16 +1604,15 @@ void Dock::Render() {
                 float wob = 0.55f + 0.45f * std::sin(tt * (7.f + b * 2.3f) + b * 1.7f);
                 float hgt = 2.5f + 6.f * std::clamp(musicLevel_ * 1.6f, 0.f, 1.f) * wob;
                 float bx = a.x + b * 4.f;
-                float y1 = kBodyH - 2.5f;
+                float y1 = kBodyH - 2.f;
                 rt_->FillRoundedRectangle(
                     D2D1_ROUNDED_RECT{D2D1::RectF(bx - 1.1f, y1 - hgt, bx + 1.1f, y1), 1.1f, 1.1f}, brush_.Get());
             }
         } else if (dot > 0.01f) {
-            float dw = (a.active ? 10.f : 4.f) * dot, dh = 4.f * dot;
-            D2D1_COLOR_F c = a.active ? accent_ : (light_ ? Rgba(0, 0, 0, 0.55f) : Rgba(1, 1, 1, 0.60f));
-            if (a.active && light_) c = Rgba(0.10f, 0.10f, 0.12f, 0.9f);
+            float dw = (a.active ? 14.f : 6.f) * dot, dh = 3.f * dot;
+            D2D1_COLOR_F c = a.active ? Rgba(0.30f, 0.62f, 1.f, 1.f) : (light_ ? Rgba(0, 0, 0, 0.40f) : Rgba(1, 1, 1, 0.50f));
             brush_->SetColor(WithAlpha(c, dot));
-            float y = kBodyH - 4.5f;
+            float y = kBodyH - 3.5f;
             rt_->FillRoundedRectangle(
                 D2D1_ROUNDED_RECT{D2D1::RectF(a.x - dw / 2, y - dh / 2, a.x + dw / 2, y + dh / 2), dh / 2, dh / 2},
                 brush_.Get());
@@ -1892,17 +1951,22 @@ void Dock::ShowAppMenu(int i) {
         }
         return;
     }
-    enum { kNew = 1, kPin, kUnpin, kClose, kCloseAll };
+    // Windows görev çubuğundaki gibi: Görevler, uygulama adı, sabitle/kaldır, pencereyi kapat.
+    enum { kNew = 1, kPin, kUnpin, kClose, kCloseAll, kTask = 100 };
+    std::vector<JumpTask> tasks = JumpTasks(a.exe);
     HMENU m = CreatePopupMenu();
-    AppendMenuW(m, MF_STRING | MF_GRAYED, 0, a.name.empty() ? L"Uygulama" : a.name.c_str());
-    AppendMenuW(m, MF_SEPARATOR, 0, nullptr);
-    if (!a.launch.empty()) AppendMenuW(m, MF_STRING, kNew, a.windows.empty() ? L"Aç" : L"Yeni pencere");
-    if (a.pinned) AppendMenuW(m, MF_STRING, kUnpin, L"Dock'tan kaldır");
-    else if (!a.launch.empty()) AppendMenuW(m, MF_STRING, kPin, L"Dock'ta tut");
-    if (!a.windows.empty()) {
+    if (!tasks.empty()) {
+        AppendMenuW(m, MF_STRING | MF_GRAYED, 0, L"Görevler");
+        for (size_t k = 0; k < tasks.size(); ++k)
+            AppendMenuW(m, MF_STRING, kTask + static_cast<UINT>(k), tasks[k].title.c_str());
         AppendMenuW(m, MF_SEPARATOR, 0, nullptr);
+    }
+    if (!a.launch.empty()) AppendMenuW(m, MF_STRING, kNew, a.name.empty() ? L"Aç" : a.name.c_str());
+    if (a.pinned) AppendMenuW(m, MF_STRING, kUnpin, L"Görev çubuğundan kaldır");
+    else if (!a.launch.empty()) AppendMenuW(m, MF_STRING, kPin, L"Görev çubuğuna sabitle");
+    if (!a.windows.empty()) {
         if (a.windows.size() == 1) {
-            AppendMenuW(m, MF_STRING, kClose, L"Kapat");
+            AppendMenuW(m, MF_STRING, kClose, L"Pencereyi kapat");
         } else {
             wchar_t label[64];
             swprintf_s(label, L"Tüm pencereleri kapat (%zu)", a.windows.size());
@@ -1919,6 +1983,13 @@ void Dock::ShowAppMenu(int i) {
     DestroyMenu(m);
     if (i >= static_cast<int>(apps_.size())) return;
     App& b = apps_[i];
+    if (cmd >= static_cast<UINT>(kTask) && cmd - static_cast<UINT>(kTask) < tasks.size()) {
+        const JumpTask& t = tasks[cmd - kTask];
+        ShellExecuteW(nullptr, L"open", t.path.c_str(), t.args.empty() ? nullptr : t.args.c_str(),
+                      t.dir.empty() ? nullptr : t.dir.c_str(), SW_SHOWNORMAL);
+        StartAnimation();
+        return;
+    }
     switch (cmd) {
     case kNew:
         if (b.windows.empty()) b.launchAt = Now();

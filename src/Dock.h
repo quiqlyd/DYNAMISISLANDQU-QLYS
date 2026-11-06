@@ -72,6 +72,7 @@ private:
         Spring press;   // basınca gömülme (DIP)
         Spring dot;     // açık göstergesi (0-100)
         Spring appear;  // yeni gelen ikon 0'dan büyür (0-100)
+        Spring hov;     // üzerine gelme vurgusu (0-100)
         Spring slide;   // sürükleyerek sıralarken yer değiştiren komşunun kayması (DIP)
         bool attention = false;  // "bana bak" diyen uygulama: rozet
         double launchAt = -1;  // açılış zıplaması başladığı an
@@ -146,6 +147,7 @@ private:
     void Render();
     void DrawIcon(App& a, float cx, float bottom, float size, float opacity = 1.f);
     void DrawStart(float cx, float bottom, float size);
+    void DrawWindowsLogo(float cx, float bottom, float size);
     void DrawLabel(const App& a, float cx, float top);
     ID2D1Bitmap* Icon(App& a);
     double Now() const;
