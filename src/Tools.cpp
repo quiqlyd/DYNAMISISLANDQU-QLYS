@@ -11,6 +11,7 @@
 #include <algorithm>
 #include <cmath>
 #include <cstdio>
+#include <cstdlib>
 #include <cstring>
 #include <cwchar>
 
@@ -38,6 +39,7 @@ constexpr int kPages = (Island::kToolCount + kToolCols - 1) / kToolCols;
 constexpr int kFavPage = kPages, kAllPages = kPages + 1;
 constexpr float kRowW = kToolCols * kTile + (kToolCols - 1) * kTileGap;
 constexpr size_t kNoteMax = 600;
+constexpr float kDotStep = 18.f, kArrowGap = 22.f;  // sayfa noktaları arası, son noktadan oka
 
 // Kalem renkleri: kırmızı, sarı, yeşil, mavi, beyaz
 const D2D1_COLOR_F kInkColors[] = {
@@ -80,7 +82,16 @@ int Island::ToolHit(float x, float y) const {
         int t = toolPage_ * kToolCols + col;
         return t < kToolCount ? t : -1;
     }
-    if (y > y0 + kTile && y <= top + kToolsH && std::fabs(x - w / 2) < 40.f) return x < w / 2 ? -10 : -11;
+    if (y > y0 + kTile && y <= top + kToolsH) {
+        // Sayfa şeridi: oklar önceki/sonraki, noktaya tıklayınca o sayfa.
+        float half = (kAllPages - 1) / 2.f * kDotStep;
+        float dx = x - w / 2;
+        if (std::fabs(dx) <= half + kDotStep / 2) {
+            int p = static_cast<int>(std::lround(dx / kDotStep + (kAllPages - 1) / 2.f));
+            return -20 - std::clamp(p, 0, kAllPages - 1);
+        }
+        if (std::fabs(dx) <= half + kArrowGap + 22.f) return dx < 0 ? -10 : -11;
+    }
     return -1;
 }
 
@@ -158,10 +169,23 @@ void Island::DrawTools(View v, float w) {
     for (int p = 0; p < kAllPages; ++p) {
         float a = 1.f - std::min(1.f, std::fabs(page - p));
         float dw = 6.f + 8.f * a;
-        float cx = w / 2 + (p - (kAllPages - 1) / 2.f) * 16.f;
-        brush_->SetColor(Rgba(1, 1, 1, 0.25f + 0.6f * a));
+        float cx = w / 2 + (p - (kAllPages - 1) / 2.f) * kDotStep;
+        bool hot = hoverTool_ == -20 - p;
+        brush_->SetColor(Rgba(1, 1, 1, 0.25f + 0.6f * a + (hot ? 0.2f : 0.f)));
         rt_->FillRoundedRectangle(D2D1_ROUNDED_RECT{D2D1::RectF(cx - dw / 2, cy - 3, cx + dw / 2, cy + 3), 3, 3},
                                   brush_.Get());
+    }
+    // Oklar: hangi yöne gidilebildiğini gösterir.
+    float half = (kAllPages - 1) / 2.f * kDotStep;
+    for (int side = 0; side < 2; ++side) {
+        bool can = side == 0 ? toolPage_ > 0 : toolPage_ < kAllPages - 1;
+        bool hot = hoverTool_ == (side == 0 ? -10 : -11);
+        float ax = w / 2 + (side == 0 ? -1.f : 1.f) * (half + kArrowGap), d = side == 0 ? 1.f : -1.f;
+        brush_->SetColor(Rgba(1, 1, 1, !can ? 0.12f : hot ? 0.95f : 0.5f));
+        rt_->DrawLine(D2D1::Point2F(ax + 2.5f * d, cy - 4.5f), D2D1::Point2F(ax - 2.f * d, cy), brush_.Get(), 1.8f,
+                      roundStroke_.Get());
+        rt_->DrawLine(D2D1::Point2F(ax - 2.f * d, cy), D2D1::Point2F(ax + 2.5f * d, cy + 4.5f), brush_.Get(), 1.8f,
+                      roundStroke_.Get());
     }
 }
 
@@ -178,6 +202,18 @@ void Island::SetToolPage(int page) {
     for (auto& g : toolGlow_) g.target = 0.f;
     for (auto& g : favGlow_) g.target = 0.f;
     StartAnimation();
+}
+
+// Teker / dokunmatik yüzey: küçük adımlar birikir; bir çevirmeden sonra kısa bekleme,
+// böylece tek kaydırma birden çok sayfa atlamaz.
+void Island::PageWheel(int delta) {
+    double now = Now();
+    if (now - lastPageFlip_ > 0.6) wheelAcc_ = 0;
+    wheelAcc_ += delta;
+    if (std::abs(wheelAcc_) < WHEEL_DELTA / 2 || now - lastPageFlip_ < 0.32) return;
+    SetToolPage(toolPage_ + (wheelAcc_ > 0 ? 1 : -1));
+    wheelAcc_ = 0;
+    lastPageFlip_ = now;
 }
 
 void Island::RunTool(Tool t) {

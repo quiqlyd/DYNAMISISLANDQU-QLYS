@@ -17,17 +17,18 @@ namespace {
 
 // Ana sayfa yerleşimi (kHome: 400 x 132)
 constexpr float kHPad = 14.f, kHTop = 14.f, kHBottom = 118.f;
-constexpr float kLeftX0 = 14.f, kLeftX1 = 164.f;
-constexpr float kMidX0 = 172.f, kMidX1 = 290.f;
-constexpr float kFavX0 = 298.f, kFavTile = 48.f, kFavGap = 8.f;
-constexpr float kPlayX = 140.f, kPlayY = 46.f, kPlayR = 16.f;
+// Hepsi 400 genişliğe sığar: 14 | sol 134 | 8 | orta 108 | 8 | favoriler 2x54+6 | 14
+constexpr float kLeftX0 = 14.f, kLeftX1 = 148.f;
+constexpr float kMidX0 = 156.f, kMidX1 = 264.f;
+constexpr float kFavX0 = 272.f, kFavTileW = 54.f, kFavTileH = 49.f, kFavGap = 6.f;
+constexpr float kPlayX = 124.f, kPlayY = 46.f, kPlayR = 16.f;
 constexpr int kHomeFavs = 4;
 
 enum HomeHitCode { kHitNone = -1, kHitMusic = 1, kHitPlay = 2, kHitEyes = 3, kHitFocus = 4, kHitFav = 50 };
 
 D2D1_RECT_F FavRect(int i) {
-    float x = kFavX0 + (i % 2) * (kFavTile + kFavGap), y = kHTop + (i / 2) * (kFavTile + kFavGap);
-    return D2D1::RectF(x, y, x + kFavTile, y + kFavTile);
+    float x = kFavX0 + (i % 2) * (kFavTileW + kFavGap), y = kHTop + (i / 2) * (kFavTileH + kFavGap);
+    return D2D1::RectF(x, y, x + kFavTileW, y + kFavTileH);
 }
 
 bool In(D2D1_RECT_F r, float x, float y) { return x >= r.left && x <= r.right && y >= r.top && y <= r.bottom; }
@@ -178,17 +179,17 @@ void Island::DrawHome(float w, float h) {
             rt_->FillRoundedRectangle(D2D1_ROUNDED_RECT{r, 14, 14}, brush_.Get());
             if (i < n) {
                 if (ID2D1Bitmap* icon = FavoriteIcon(static_cast<size_t>(i))) {
-                    rt_->DrawBitmap(icon, D2D1::RectF(cx - 12, cy - 15, cx + 12, cy + 9), 1.f,
+                    rt_->DrawBitmap(icon, D2D1::RectF(cx - 11, cy - 16, cx + 11, cy + 6), 1.f,
                                     D2D1_BITMAP_INTERPOLATION_MODE_LINEAR);
                 } else {
                     const std::wstring& label = favs_[static_cast<size_t>(i)].label;
                     wchar_t letter[2] = {label.empty() ? L'?' : label[0], 0};
                     brush_->SetColor(Rgba(1, 1, 1, 0.18f));
-                    rt_->FillEllipse(D2D1::Ellipse(D2D1::Point2F(cx, cy - 3), 12, 12), brush_.Get());
-                    Text(letter, fAa_.Get(), D2D1::RectF(cx - 12, cy - 15, cx + 12, cy + 9), kWhite);
+                    rt_->FillEllipse(D2D1::Ellipse(D2D1::Point2F(cx, cy - 5), 11, 11), brush_.Get());
+                    Text(letter, fAa_.Get(), D2D1::RectF(cx - 12, cy - 17, cx + 12, cy + 7), kWhite);
                 }
                 Text(favs_[static_cast<size_t>(i)].label.c_str(), fSmallCenter_.Get(),
-                     D2D1::RectF(r.left + 1, cy + 9, r.right - 1, r.bottom - 1), kGray);
+                     D2D1::RectF(r.left + 2, cy + 7, r.right - 2, r.bottom - 1), kGray);
             } else {
                 brush_->SetColor(Rgba(1, 1, 1, 0.7f));
                 rt_->DrawLine(D2D1::Point2F(cx - 7, cy), D2D1::Point2F(cx + 7, cy), brush_.Get(), 2.f, roundStroke_.Get());

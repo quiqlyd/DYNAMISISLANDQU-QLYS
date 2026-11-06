@@ -1400,7 +1400,7 @@ void Island::OnMouseMove(float x, float y) {
         for (int i = 0; i < 3; ++i) btnGlow_[i].target = i == b ? 1.f : 0.f;
         StartAnimation();
     }
-    int t = std::max(-1, ToolHit(x, y));
+    int t = ToolHit(x, y);  // -10/-11 oklar, -20.. noktalar: üstüne gelince parlar
     if (t != hoverTool_) {
         hoverTool_ = t;
         for (int i = 0; i < kToolCount; ++i) toolGlow_[i].target = i == t ? 1.f : 0.f;
@@ -1643,8 +1643,12 @@ void Island::OnClick(float x, float y) {
             RunTool(static_cast<Tool>(t));
             return;
         }
+        if (t <= -20) {
+            SetToolPage(-20 - t);  // noktaya tıkla: o sayfa
+            return;
+        }
         if (t <= -10) {
-            SetToolPage(toolPage_ + (t == -10 ? -1 : 1));  // sayfa noktaları: sol önceki, sağ sonraki
+            SetToolPage(toolPage_ + (t == -10 ? -1 : 1));  // oklar: önceki / sonraki
             return;
         }
         if (y > ToolsTop()) return;  // araç sırasının boşlukları / raf
@@ -3106,6 +3110,14 @@ LRESULT Island::WndProc(UINT msg, WPARAM wp, LPARAM lp) {
         return MA_NOACTIVATE;  // tıklayınca açık uygulamanın odağını çalma
 
     case WM_LBUTTONDOWN:
+        swipeX0_ = -1;
+        if (ToolsShown(view_)) {
+            float y = GET_Y_LPARAM(lp) / scale_;
+            if (y >= ToolsTop() && y <= ToolsTop() + kToolsH) {
+                swipeX0_ = GET_X_LPARAM(lp) / scale_;  // basılı tutup yana çekince sayfa değişir
+                swipeMoved_ = false;
+            }
+        }
         if (view_ == View::ExpandedMedia) {
             float x = GET_X_LPARAM(lp) / scale_ - kPad, y = GET_Y_LPARAM(lp) / scale_;
             int hit = MediaHit(x, y);
@@ -3187,6 +3199,17 @@ LRESULT Island::WndProc(UINT msg, WPARAM wp, LPARAM lp) {
             swallowUpUntil_ = 0;
             return 0;
         }
+        if (swipeX0_ >= 0) {
+            float dx = GET_X_LPARAM(lp) / scale_ - swipeX0_;
+            bool moved = swipeMoved_;
+            swipeX0_ = -1;
+            if (moved) {
+                if (GetCapture() == hwnd_) ReleaseCapture();
+                if (std::fabs(dx) > 28.f) SetToolPage(toolPage_ + (dx < 0 ? 1 : -1));
+                else SetToolPage(toolPage_);  // az çekildi: yerine yaylanır
+                return 0;
+            }
+        }
         if (pressBtn_ >= 0) {
             btnScale_[pressBtn_].target = 1.f;
             btnScale_[pressBtn_].velocity += 3.f;  // bırakınca yaylanarak geri gelir
@@ -3197,6 +3220,19 @@ LRESULT Island::WndProc(UINT msg, WPARAM wp, LPARAM lp) {
         return 0;
 
     case WM_MOUSEMOVE:
+        if (swipeX0_ >= 0 && (wp & MK_LBUTTON)) {
+            float dx = GET_X_LPARAM(lp) / scale_ - swipeX0_;
+            if (!swipeMoved_ && std::fabs(dx) > 6.f) {
+                swipeMoved_ = true;
+                SetCapture(hwnd_);
+            }
+            if (swipeMoved_) {
+                // Parmağı takip eder; bırakınca en yakın sayfaya oturur.
+                pageX_.target = static_cast<float>(toolPage_) - dx / 380.f;
+                StartAnimation();
+                return 0;
+            }
+        }
         OnMouseMove(GET_X_LPARAM(lp) / scale_ - kPad, GET_Y_LPARAM(lp) / scale_);
         return 0;
 
@@ -3453,6 +3489,11 @@ LRESULT Island::WndProc(UINT msg, WPARAM wp, LPARAM lp) {
         if (LOWORD(lp) == WM_LBUTTONUP) ToggleUserHidden();
         return 0;
 
+    case WM_MOUSEHWHEEL:
+        // Dokunmatik yüzeyde yana kaydırma: araç sayfaları
+        if (ToolsShown(view_)) PageWheel(GET_WHEEL_DELTA_WPARAM(wp));
+        return 0;
+
     case WM_MOUSEWHEEL: {
         // Açık adanın üstünde teker: zamanlayıcı süresi (Ctrl ile 5'er dakika).
         int notches = GET_WHEEL_DELTA_WPARAM(wp) / WHEEL_DELTA;
@@ -3466,7 +3507,7 @@ LRESULT Island::WndProc(UINT msg, WPARAM wp, LPARAM lp) {
             ScreenToClient(hwnd_, &pt);
             float x = pt.x / scale_ - kPad, y = pt.y / scale_;
             if (ToolsShown(view_) && y >= ToolsTop() && y <= ToolsTop() + kToolsH) {
-                SetToolPage(toolPage_ + (notches < 0 ? 1 : -1));  // araç sırasında teker: sayfa çevir
+                PageWheel(-GET_WHEEL_DELTA_WPARAM(wp));  // araç sırasında teker: sayfa çevir
                 return 0;
             }
             if (view_ == View::Quick) {
