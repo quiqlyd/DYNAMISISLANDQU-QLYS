@@ -44,6 +44,10 @@ constexpr int kHotkeyOcr = 5;
 constexpr int kHotkeyNote = 6;
 constexpr int kHotkeyInk = 7;
 constexpr int kHotkeyDock = 20;
+constexpr int kHotkeySnap = 30;  // 30..40: pencere yerleştirme (Snapper::Action sırasıyla)
+// Ctrl+Alt ile: ← → | F G H (üçte birler) | U I J K (köşeler) | Enter (tam) | Backspace (geri).
+// Ctrl+Alt = AltGr: Türkçe klavyede işaret yazan tuşlar (Q, E, T, rakamlar) seçilmedi.
+constexpr UINT kSnapKeys[] = {VK_LEFT, VK_RIGHT, 'F', 'G', 'H', 'U', 'I', 'J', 'K', VK_RETURN, VK_BACK};
 
 constexpr UINT kTrayMsg = WM_APP + 2;
 constexpr UINT kFrameMsg = WM_APP + 8;  // kare saati: bir sonraki kareyi çiz
@@ -365,6 +369,9 @@ bool Island::Create(HINSTANCE instance) {
     RegisterHotKey(hwnd_, kHotkeyNote, MOD_CONTROL | MOD_ALT | MOD_NOREPEAT, 'N');
     RegisterHotKey(hwnd_, kHotkeyInk, MOD_CONTROL | MOD_ALT | MOD_NOREPEAT, 'P');
     RegisterHotKey(hwnd_, kHotkeyDock, MOD_CONTROL | MOD_ALT | MOD_NOREPEAT, 'B');
+    snap_.Init(instance_, d2d_.Get(), dwrite_.Get());
+    for (int k = 0; k < static_cast<int>(std::size(kSnapKeys)); ++k)
+        RegisterHotKey(hwnd_, kHotkeySnap + k, MOD_CONTROL | MOD_ALT | MOD_NOREPEAT, kSnapKeys[k]);
     startedAt_ = Now();
     volumeOsd_ = ReadSetting(L"VolumeOsd", 1) != 0;
     VolumeWatch::Start(hwnd_);
@@ -495,6 +502,7 @@ void Island::SetTargets(View v) {
     case View::Alert:
         s = !IsFileCard() ? kAlert : (alertKind_ == AlertKind::Screenshot ? kShot : kDownload);
         if (alertKind_ == AlertKind::Notification) s = {390, 40, 20};
+        if (alertKind_ == AlertKind::Snap) s = {320, 40, 20};
         break;
     case View::Timer: s = kTimer; break;
     case View::Command: s = {kCommandW, CommandHeight(), 24}; break;
@@ -1590,6 +1598,10 @@ void Island::DrawAlert(float w, float h) {
         DrawVolume(w, h);
         return;
     }
+    if (alertKind_ == AlertKind::Snap) {
+        DrawSnap(w, h);
+        return;
+    }
     if (alertKind_ >= AlertKind::UpdateAvailable) {
         const wchar_t* glyph = kGlyphSync;
         const wchar_t* label = L"";
@@ -2245,6 +2257,36 @@ void Island::OnVolume(int percent, bool muted) {
     ShowAlert(AlertKind::Volume, percent, 1500);
 }
 
+// Pencere yerleştirme: Guti pencereye bakar, adada basılan tuşlar ve yerleşim adı görünür.
+void Island::OnSnapKey(int index) {
+    auto a = static_cast<Snapper::Action>(index);
+    if (!snap_.Run(a)) {
+        eyes_.SetMood(Eyes::Mood::Curious, Now(), 0.8);  // yerleştirilecek pencere yok
+        StartAnimation();
+        return;
+    }
+    snapAction_ = a;
+    Snapper::LookDir(a, lookX_, lookY_);
+    lookUntil_ = Now() + 1.3;
+    ShowAlert(AlertKind::Snap, 0, 1400);
+    StartAnimation();
+}
+
+void Island::DrawSnap(float w, float h) {
+    eyes_.Draw(rt_.Get(), d2d_.Get(), brush_.Get(), roundStroke_.Get(), 30, h / 2, 0.68f, 0.f);
+    const wchar_t* keys[3] = {L"Ctrl", L"Alt", Snapper::Key(snapAction_)};
+    float widths[3] = {34, 30, 26};
+    float x = 58, cy = h / 2;
+    for (int k = 0; k < 3; ++k) {
+        D2D1_ROUNDED_RECT cap{D2D1::RectF(x, cy - 11, x + widths[k], cy + 11), 6, 6};
+        brush_->SetColor(Rgba(1, 1, 1, k == 2 ? 0.22f : 0.12f));
+        rt_->FillRoundedRectangle(cap, brush_.Get());
+        Text(keys[k], fSmallCenter_.Get(), D2D1::RectF(x, cy - 11, x + widths[k], cy + 11), kWhite);
+        x += widths[k] + 5;
+    }
+    Text(Snapper::Label(snapAction_), fAlert_.Get(), D2D1::RectF(x + 8, 0, w - 16, h), kWhite);
+}
+
 void Island::DrawVolume(float w, float h) {
     eyes_.Draw(rt_.Get(), d2d_.Get(), brush_.Get(), roundStroke_.Get(), 30, h / 2, 0.68f, 0.f);
     bool silent = muted_ || alertValue_ == 0;
@@ -2837,6 +2879,7 @@ void Island::OnLookTimer() {
     if (commandMode_) eyes_.LookAt(0.7f, 0.15f);  // yazdıklarına bakar
     else if (noteMode_) eyes_.LookAt(0.35f, 0.7f);  // nota bakar
     else if (now < lookDownUntil_) eyes_.LookAt(0.f, 1.f);  // dock'ta açılan uygulamaya bakar
+    else if (now < lookUntil_) eyes_.LookAt(lookX_, lookY_);  // yerleştirilen pencereye bakar
     else eyes_.LookAt(dx / (700.f * scale_), dy / (380.f * scale_));
     if (eyes_.Tick(now) && ViewShowsEyes()) StartAnimation();
 }
@@ -3613,6 +3656,8 @@ LRESULT Island::WndProc(UINT msg, WPARAM wp, LPARAM lp) {
             else OpenNote();
         }
         if (wp == kHotkeyDock) ToggleDock();
+        if (static_cast<int>(wp) >= kHotkeySnap && static_cast<int>(wp) < kHotkeySnap + static_cast<int>(std::size(kSnapKeys)))
+            OnSnapKey(static_cast<int>(wp) - kHotkeySnap);
         if (wp == kHotkeyInk) {
             if (ink_) EndInk();
             else StartInk();
@@ -3679,6 +3724,8 @@ LRESULT Island::WndProc(UINT msg, WPARAM wp, LPARAM lp) {
         UnregisterHotKey(hwnd_, kHotkeyNote);
         UnregisterHotKey(hwnd_, kHotkeyInk);
         UnregisterHotKey(hwnd_, kHotkeyDock);
+        for (int k = 0; k < static_cast<int>(std::size(kSnapKeys)); ++k) UnregisterHotKey(hwnd_, kHotkeySnap + k);
+        snap_.Shutdown();
         RevokeDragDrop(hwnd_);
         if (dropTarget_) dropTarget_->Release();
         dropTarget_ = nullptr;

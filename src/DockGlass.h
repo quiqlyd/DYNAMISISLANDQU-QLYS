@@ -15,6 +15,8 @@ public:
     bool Attached() const;
     // Boyut (px), köşe yarıçapı (px) ve tema.
     void Update(int width, int height, float radius, bool light);
+    // Tüm camın saydamlığı (0..1), belirip sönme için.
+    void SetOpacity(float opacity);
 
 private:
     struct Impl;

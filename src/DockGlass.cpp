@@ -110,3 +110,11 @@ void DockGlass::Update(int width, int height, float radius, bool light) {
     } catch (...) {
     }
 }
+
+void DockGlass::SetOpacity(float opacity) {
+    if (!impl_) return;
+    try {
+        impl_->root.Opacity(opacity);
+    } catch (...) {
+    }
+}

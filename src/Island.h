@@ -19,6 +19,7 @@
 #include "Lyrics.h"
 #include "Weather.h"
 #include "MediaService.h"
+#include "Snap.h"
 #include "Spring.h"
 #include "Watchers.h"
 
@@ -34,7 +35,7 @@ private:
     enum class AlertKind { Charging, Unplugged, LowBattery, UpdateAvailable, Updating, UpToDate, UpdateFailed, TimerDone, FocusDone, BreakDone,
                            CpuBusy, MemoryFull, Offline, Online, Download,
                            Reminder, ReminderSet, Screenshot, Volume, Headphones, HeadphonesLow, Copied,
-                           Reading, OcrFailed, Notification };
+                           Reading, OcrFailed, Notification, Snap };
 
     static LRESULT CALLBACK StaticWndProc(HWND, UINT, WPARAM, LPARAM);
     LRESULT WndProc(UINT msg, WPARAM wp, LPARAM lp);
@@ -258,6 +259,8 @@ private:
     void Text(const wchar_t* text, IDWriteTextFormat* format, D2D1_RECT_F rect,
                   D2D1_COLOR_F color);
     void DrawBattery(float x, float y, float w, float h, int percent, bool charging);
+    void DrawSnap(float w, float h);
+    void OnSnapKey(int index);
 
     // Girdi
     void OnClick(float x, float y);
@@ -296,6 +299,10 @@ private:
     Microsoft::WRL::ComPtr<ID2D1Factory> d2d_;
     Microsoft::WRL::ComPtr<IDWriteFactory> dwrite_;
     Dock dock_;  // yeni taskbar (Ayarlar > Guti Dock)
+    Snapper snap_;  // pencere yerleştirme (Ctrl+Alt+oklar, F/G/H, U/I/J/K, Enter, Backspace)
+    Snapper::Action snapAction_ = Snapper::Action::Left;
+    float lookX_ = 0, lookY_ = 0;
+    double lookUntil_ = 0;
     Microsoft::WRL::ComPtr<ID2D1RenderTarget> rt_;      // çizimin yapıldığı hedef (GPU ya da yazılım)
     Microsoft::WRL::ComPtr<ID2D1DCRenderTarget> dcRt_;  // yazılım yedeği
     Microsoft::WRL::ComPtr<ID3D11Device> d3d_;

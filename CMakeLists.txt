@@ -28,6 +28,7 @@ add_executable(DynamisIsland WIN32
     src/Weather.cpp
     src/Dock.cpp
     src/DockGlass.cpp
+    src/Snap.cpp
     src/Island.h
     src/MediaService.h
     src/Spring.h
@@ -45,6 +46,7 @@ add_executable(DynamisIsland WIN32
     src/Notify.h
     src/Dock.h
     src/DockGlass.h
+    src/Snap.h
 )
 
 set(APP_VERSION 0 CACHE STRING "Sürüm numarası (CI çalıştırma numarası)")
