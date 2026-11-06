@@ -17,7 +17,10 @@ using winrt::Windows::Foundation::Numerics::float2;
 namespace {
 // Süreç boyunca tek bir derleyici (compositor). Kapanışta serbest bırakılmaz:
 // COM kapandıktan sonra Release çağrılıp çökmesin.
-wuc::Compositor* g_comp = nullptr;
+struct CompHolder {
+    wuc::Compositor comp;
+};
+CompHolder* g_comp = nullptr;
 
 bool EnsureCompositor() {
     if (g_comp) return true;
@@ -28,7 +31,7 @@ bool EnsureCompositor() {
             if (FAILED(CreateDispatcherQueueController(o, &c)) || !c) return false;
             // Bilerek sızdırılır: UI iş parçacığının kuyruğu uygulama boyunca yaşar.
         }
-        g_comp = new wuc::Compositor();
+        g_comp = new CompHolder{wuc::Compositor()};
         return true;
     } catch (...) {
         return false;
@@ -53,7 +56,7 @@ bool DockGlass::Attach(HWND hwnd) {
     Detach();
     if (!EnsureCompositor()) return false;
     try {
-        auto& comp = *g_comp;
+        auto& comp = g_comp->comp;
         auto impl = std::make_unique<Impl>();
         auto interop = comp.as<ABI::Windows::UI::Composition::Desktop::ICompositorDesktopInterop>();
         if (FAILED(interop->CreateDesktopWindowTarget(
