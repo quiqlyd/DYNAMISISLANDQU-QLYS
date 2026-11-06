@@ -238,5 +238,7 @@ private:
     HANDLE frameEvent_ = nullptr;
     std::atomic<bool> wantFrames_{false}, framePending_{false}, quit_{false};
     bool animating_ = false;
+    double lastFrameAt_ = 0;  // son karenin zamanı: kareler takılırsa bekçi zamanlayıcısı çizer
+    int stallLogs_ = 0;
     LARGE_INTEGER qpcFreq_{}, lastTick_{};
 };

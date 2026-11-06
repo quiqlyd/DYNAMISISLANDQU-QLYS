@@ -55,6 +55,7 @@ constexpr UINT_PTR kTimerPreview = 3;    // fare ikonda durunca önizleme açıl
 constexpr UINT_PTR kTimerPanelOut = 4;   // panel dışına çıkınca kapanır
 constexpr UINT_PTR kTimerAutoHide = 5;   // otomatik gizlemede fare ekranın altına geldi mi?
 constexpr UINT_PTR kTimerBlink = 6;      // mini Guti ara sıra göz kırpar
+constexpr UINT_PTR kTimerWatch = 7;      // kare akışı takılırsa animasyonu yine de yürütür
 
 constexpr wchar_t kPinnedDir[] = L"\\Microsoft\\Internet Explorer\\Quick Launch\\User Pinned\\TaskBar";
 
@@ -491,6 +492,7 @@ bool Dock::Enable(HINSTANCE instance, ID2D1Factory* d2d, IDWriteFactory* dwrite)
             static_cast<int>(ht), glassFx_.Attached() ? 1 : 0, scale_, monitor_.left, monitor_.top, monitor_.right,
             monitor_.bottom);
     SetTimer(overlay_, kTimerBlink, 3500, nullptr);
+    SetTimer(overlay_, kTimerWatch, 50, nullptr);
     focusA_.stiffness = 200.f;
     focusA_.damping = 28.f;
     HideTaskbar();  // önce Windows taskbar'ı çekilsin ki dock'un yeri en alttan ayrılsın
@@ -1042,6 +1044,7 @@ void Dock::FrameLoop() {
 
 void Dock::OnFrame() {
     if (!overlay_) return;
+    lastFrameAt_ = Now();
     LARGE_INTEGER now;
     QueryPerformanceCounter(&now);
     float dt = static_cast<float>(now.QuadPart - lastTick_.QuadPart) / qpcFreq_.QuadPart;
@@ -1714,6 +1717,19 @@ LRESULT Dock::OnOverlay(UINT msg, WPARAM wp, LPARAM lp) {
             CheckPanelHover();
         } else if (wp == kTimerAutoHide) {
             UpdateAutoHide();
+        } else if (wp == kTimerWatch) {
+            // Ekran kartının dikey senkron beklemesi bazı sistemlerde kare göndermeyi kesebiliyor:
+            // animasyon sürerken 80 ms kare gelmezse kareyi buradan çizeriz.
+            if (animating_ && Now() - lastFrameAt_ > 0.08) {
+                if (stallLogs_ < 5) {
+                    ++stallLogs_;
+                    DockLog("frames stalled want=%d pending=%d", wantFrames_.load() ? 1 : 0,
+                            framePending_.load() ? 1 : 0);
+                }
+                framePending_ = false;
+                OnFrame();
+                if (animating_ && frameEvent_) SetEvent(frameEvent_);
+            }
         } else if (wp == kTimerBlink) {
             blinkAt_ = Now();
             StartAnimation();
