@@ -206,6 +206,36 @@ void Dock::RestoreTaskbarNow() {
     WriteSetting(L"DockTbHidden", 0);
 }
 
+bool Dock::ForegroundFullscreen() {
+    HWND fg = GetForegroundWindow();
+    if (!fg) return false;
+    wchar_t cls[64];
+    GetClassNameW(fg, cls, ARRAYSIZE(cls));
+    if (!wcscmp(cls, L"Progman") || !wcscmp(cls, L"WorkerW") || !wcscmp(cls, L"Shell_TrayWnd")) return false;
+    LONG_PTR ex = GetWindowLongPtrW(fg, GWL_EXSTYLE);
+    if (ex & WS_EX_TRANSPARENT) return false;  // ekran kaydı / kenar ışığı gibi katmanlar
+    DWORD cloaked = 0;
+    if (SUCCEEDED(DwmGetWindowAttribute(fg, DWMWA_CLOAKED, &cloaked, sizeof(cloaked))) && cloaked) return false;
+    MONITORINFO mi{sizeof(mi)};
+    if (!GetMonitorInfoW(MonitorFromWindow(fg, MONITOR_DEFAULTTONEAREST), &mi)) return false;
+    RECT r;
+    if (!GetWindowRect(fg, &r)) return false;
+    return r.left <= mi.rcMonitor.left && r.top <= mi.rcMonitor.top && r.right >= mi.rcMonitor.right &&
+           r.bottom >= mi.rcMonitor.bottom;
+}
+
+void Dock::SetFullscreen(bool on) {
+    if (on == fullscreen_) return;
+    // Oyun / tam ekran video: dock tamamen çekilir.
+    fullscreen_ = on;
+    ShowWindow(glass_, on ? SW_HIDE : SW_SHOWNOACTIVATE);
+    ShowWindow(overlay_, on ? SW_HIDE : SW_SHOWNOACTIVATE);
+    if (!on) {
+        SetWindowPos(glass_, HWND_TOPMOST, 0, 0, 0, 0, SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE);
+        StartAnimation();
+    }
+}
+
 void Dock::RepairOnStartup(bool dockEnabled) {
     if (!dockEnabled) RestoreTaskbarNow();
 }
@@ -606,6 +636,7 @@ void Dock::Rescan() {
         if (h == fg || h == fgRoot) app->active = true;
     }
     g_describeCache.swap(keep);
+    if (fullscreen_ && !ForegroundFullscreen()) SetFullscreen(false);
     for (auto& a : apps_) {
         if (a.isStart || a.isSeparator) continue;
         bool open = !a.windows.empty();
@@ -1226,14 +1257,7 @@ LRESULT CALLBACK Dock::GlassProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
         if (wp == ABN_POSCHANGED) {
             d->RegisterAppBar();
         } else if (wp == ABN_FULLSCREENAPP) {
-            // Oyun / tam ekran video: dock tamamen çekilir.
-            d->fullscreen_ = lp != 0;
-            ShowWindow(d->glass_, d->fullscreen_ ? SW_HIDE : SW_SHOWNOACTIVATE);
-            ShowWindow(d->overlay_, d->fullscreen_ ? SW_HIDE : SW_SHOWNOACTIVATE);
-            if (!d->fullscreen_) {
-                SetWindowPos(d->glass_, HWND_TOPMOST, 0, 0, 0, 0, SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE);
-                d->StartAnimation();
-            }
+            d->SetFullscreen(lp != 0 && ForegroundFullscreen());
         }
         return 0;
     case WM_ERASEBKGND: {

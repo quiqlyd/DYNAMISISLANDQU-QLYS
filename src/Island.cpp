@@ -43,6 +43,7 @@ constexpr int kHotkeyPicker = 4;
 constexpr int kHotkeyOcr = 5;
 constexpr int kHotkeyNote = 6;
 constexpr int kHotkeyInk = 7;
+constexpr int kHotkeyDock = 20;
 
 constexpr UINT kTrayMsg = WM_APP + 2;
 constexpr UINT kFrameMsg = WM_APP + 8;  // kare saati: bir sonraki kareyi çiz
@@ -352,6 +353,7 @@ bool Island::Create(HINSTANCE instance) {
     RegisterHotKey(hwnd_, kHotkeyOcr, MOD_CONTROL | MOD_ALT | MOD_NOREPEAT, 'O');
     RegisterHotKey(hwnd_, kHotkeyNote, MOD_CONTROL | MOD_ALT | MOD_NOREPEAT, 'N');
     RegisterHotKey(hwnd_, kHotkeyInk, MOD_CONTROL | MOD_ALT | MOD_NOREPEAT, 'P');
+    RegisterHotKey(hwnd_, kHotkeyDock, MOD_CONTROL | MOD_ALT | MOD_NOREPEAT, 'B');
     startedAt_ = Now();
     volumeOsd_ = ReadSetting(L"VolumeOsd", 1) != 0;
     VolumeWatch::Start(hwnd_);
@@ -747,6 +749,9 @@ void Island::CheckFullscreen() {
         fullscreen = state == QUNS_BUSY || state == QUNS_RUNNING_D3D_FULL_SCREEN ||
                      state == QUNS_PRESENTATION_MODE;
     }
+    // Windows "tam ekran" der ama öndeki pencere ekranı kaplamıyorsa (ör. ekranın kenarında
+    // tıklama geçiren bir ışık/kayıt katmanı) ada saklanmasın.
+    if (fullscreen && state != QUNS_PRESENTATION_MODE && !Dock::ForegroundFullscreen()) fullscreen = false;
     if (fullscreen != fullscreen_) {
         fullscreen_ = fullscreen;
         ApplyVisibility();
@@ -2962,7 +2967,7 @@ void Island::ShowTrayMenu() {
     if (companion_.Kind() == Companion::TimerKind::Quick)
         AppendMenuW(menu, MF_STRING, kCmdCancelTimer, L"Zamanlayıcıyı iptal et");
     AppendMenuW(menu, MF_STRING | (dock_.Enabled() ? MF_CHECKED : 0), kCmdDock,
-                L"Guti Dock (yeni taskbar)");
+                L"Guti Dock (yeni taskbar)\tCtrl+Alt+B");
     AppendMenuW(menu, MF_POPUP, reinterpret_cast<UINT_PTR>(settings), L"Ayarlar");
 
     AppendMenuW(menu, MF_SEPARATOR, 0, nullptr);
@@ -3583,6 +3588,7 @@ LRESULT Island::WndProc(UINT msg, WPARAM wp, LPARAM lp) {
             if (noteMode_) CloseNote(true);
             else OpenNote();
         }
+        if (wp == kHotkeyDock) ToggleDock();
         if (wp == kHotkeyInk) {
             if (ink_) EndInk();
             else StartInk();
@@ -3648,6 +3654,7 @@ LRESULT Island::WndProc(UINT msg, WPARAM wp, LPARAM lp) {
         UnregisterHotKey(hwnd_, kHotkeyOcr);
         UnregisterHotKey(hwnd_, kHotkeyNote);
         UnregisterHotKey(hwnd_, kHotkeyInk);
+        UnregisterHotKey(hwnd_, kHotkeyDock);
         RevokeDragDrop(hwnd_);
         if (dropTarget_) dropTarget_->Release();
         dropTarget_ = nullptr;

@@ -34,6 +34,8 @@ public:
     static void RestoreTaskbarNow();
     // Açılışta: dock kapalıysa ama taskbar bizden gizli kaldıysa geri getir.
     static void RepairOnStartup(bool dockEnabled);
+    // Öndeki pencere gerçekten tüm ekranı kaplıyor mu? (tıklama geçiren saydam katmanlar sayılmaz)
+    static bool ForegroundFullscreen();
 
 private:
     struct App {
@@ -72,6 +74,7 @@ private:
     void RemoveAppBar();
     void HideTaskbar();
     void RestoreTaskbar();
+    void SetFullscreen(bool on);
 
     void LoadPins();
     void SavePins();
